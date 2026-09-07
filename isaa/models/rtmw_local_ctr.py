@@ -68,7 +68,7 @@ class MainNodeCTR(ChannelWiseTopologyGraphConv):
         self.base_topology.copy_(adjacency)
         self.topology_mask.fill_(1)
         self.static_topology = nn.Parameter(adjacency.clone())
-        self.proj_norm = PointBatchNorm(channels)
+        self.proj_norm = PointBatchNorm(out_channels)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         weight = mask.to(x.dtype)
