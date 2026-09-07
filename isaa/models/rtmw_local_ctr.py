@@ -100,12 +100,45 @@ class AuxiliarySkeleton(nn.Module):
                                   groups=channels, bias=False)
         self.temporal_mix = nn.Conv2d(channels, channels, 1, bias=False)
         self.temporal_norm = PointBatchNorm(channels)
+        face_groups = (tuple(range(23, 34)), tuple(range(34, 45)), tuple(range(45, 56)),
+                       tuple(range(56, 67)), tuple(range(67, 79)), tuple(range(79, 91)))
+        padded_groups = [group + (group[-1],) * (12 - len(group)) for group in face_groups]
+        face_valid = torch.zeros(6, 12, dtype=torch.bool)
+        for index, group in enumerate(face_groups):
+            face_valid[index, :len(group)] = True
+        self.register_buffer("face_indices", torch.tensor(padded_groups), persistent=False)
+        self.register_buffer("face_valid", face_valid, persistent=False)
+        self.face_temporal = nn.Conv2d(channels, channels, (3, 1), padding=(1, 0),
+                                       groups=channels, bias=False)
+        self.face_mix = nn.Conv2d(channels, channels, 1, bias=False)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for layer, norm in zip(self.layers, self.norms):
             x = F.relu(norm(layer(x), mask)).masked_fill(~mask, 0)
-        temporal = self.temporal_mix(self.temporal(x).masked_fill(~mask, 0))
-        return F.relu(x + self.temporal_norm(temporal, mask)).masked_fill(~mask, 0)
+        # Non-face joints keep their own temporal features. Face joints are
+        # reduced to six semantic tokens before temporal modeling, then
+        # broadcast back so downstream exports retain the original 133 layout.
+        nonface = torch.cat((x[..., :23], x[..., 91:]), dim=-1)
+        nonmask = torch.cat((mask[..., :23], mask[..., 91:]), dim=-1)
+        face = x.index_select(-1, self.face_indices.flatten()).reshape(x.size(0), x.size(1), x.size(2), 6, 12)
+        facemask = mask.index_select(-1, self.face_indices.flatten()).reshape(mask.size(0), 1, mask.size(2), 6, 12)
+        facemask = facemask & self.face_valid[None, None, None]
+        face = face.masked_fill(~facemask, 0)
+        face_count = facemask.sum(-1).clamp_min(1)
+        face = face.sum(-1) / face_count
+        face_mask = face_count > 0
+        nonface = self.temporal_mix(self.temporal(nonface).masked_fill(~nonmask, 0))
+        nonface = self.temporal_norm(nonface, nonmask)
+        face = self.face_mix(self.face_temporal(face).masked_fill(~face_mask, 0))
+        face = self.temporal_norm(face, face_mask)
+        output = x.new_zeros(x.shape)
+        output[..., :23] = nonface[..., :23]
+        output[..., 91:] = nonface[..., 23:]
+        output_face = face.unsqueeze(-1).expand(-1, -1, -1, -1, 12).reshape_as(
+            x.index_select(-1, self.face_indices.flatten())
+        )
+        output.index_copy_(-1, self.face_indices.flatten(), output_face)
+        return F.relu(x + output).masked_fill(~mask, 0)
 
 
 class RegionalDetailPool(nn.Module):
