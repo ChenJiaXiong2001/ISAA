@@ -2,7 +2,7 @@
 
 **Interpretable Skeleton-Based Action Analysis / 基于骨架的可解释动作分析**
 
-本目录是独立的最新研究工程：133 点固定骨架连接 + 32 个真实主节点 CTR 全连接协同。
+本目录是独立的最新研究工程：32 个真实主节点运行 CTR-GCN 主干，133 点固定骨架提供轻量辅助特征。
 模型、数据处理、骨架布局和日志组件均在本目录内，不需要导入原项目。
 内置骨架布局仅保留 RTMW-133，已移除原生 NTU/Kinect 25 点布局及注册。
 NTU120 在此仅表示动作数据集，读取的是其 RTMW-133 提取结果。
@@ -12,15 +12,18 @@ NTU120 在此仅表示动作数据集，读取的是其 RTMW-133 提取结果。
 
 - 输入：`B x 3 x T x 133 x M`，通道为相对 `x,y,score`，支持单人和多人。
 - 预处理：以肩髋中心平移、按躯干尺度归一化，保留缺失点及有效帧 mask。
-- 空间结构：133 点按固定 self/inward/outward 骨架图传播，邻接矩阵不训练，仅学习特征投影。
-- 通道拓扑：从局部特征中直接读取 32 个真实主节点，三分支 CTR 按样本和输出通道生成 32x32 关系，并叠加可学习基础图；允许任意主节点对连接。
-- 上下文融合：按固定区域归属将主节点上下文回传到 133 点，不做区域池化，不生成 133x133 动态图。
-- 时序建模：10 个图卷积、四分支多尺度时间卷积和残差模块，最后对有效节点、帧和人求全局均值并分类。
+- 主干输入：直接从原始 133 点中抽取 32 个真实主节点，进行按节点/通道的输入归一化。
+- 空间主干：10 层三分支 CTR，动态拓扑始终为 32x32；每层保留可学习基础图、共享 alpha、分支求和后归一化和图卷积残差。
+- 时间主干：仅处理 32 点。每层四分支先降到 C/4 通道，包含核为 5、dilation 为 1/2 的时间卷积、最大池化和 1x1 投影，最后拼接回 C 通道。
+- 辅助分支：133 点只运行两层固定 self/inward/outward 图卷积，通道为 3->16->16；没有 CTR、时间卷积或向 133 点回传主干上下文。
+- 分类融合：两路分别对有效节点、帧和人做全局均值。辅助 16 维特征投影到 256 维，以可学习系数（初始 0.1）加到主干特征，再由共享分类头输出 logits。辅助分支没有单独分类损失。
 
-默认训练 **100 轮**，从第 1 轮启用 133 点固定图 + 32 点 CTR。
-可用 `--fine-start-epoch 5` 在前 5 轮只处理 32 个主节点，第 6 轮启用 133 点固定图。
-通道表为 `64,64,64,96,128,128,128,192,256,256`；时间维不降采样。
-模型保留固定骨架和主节点协同的层级设计；时间分支、归一化及训练配置也不同于官方 CTR-GCN，不是逐层复现。
+默认训练 **100 轮**，从第 1 轮同时启用两路。
+`--aux-start-epoch 5` 可在前 5 轮仅训练主干，第 6 轮启用辅助分支；旧参数 `--fine-start-epoch` 是同义别名。
+`--auxiliary-channels` 设置辅助宽度，默认 16。主干通道表为 `64,64,64,64,128,128,128,256,256,256`。
+第 5、8 层时间 stride=2，64 帧变为 32、16 帧；节点数始终是 32。奇数长度向上取整，mask 按时间分箱取有效性并集。
+主干采用 CTR-GCN 的空间/时间模块组织；RTMW 输入、跨人共享的 masked 输入归一化、有效位置池化以及辅助分支属于项目适配，不能直接加载官方权重。
+133 点辅助分支全局平均后不保留时间顺序；动作时序由 32 点主干建模。当前仍使用 Adam 和原项目数据增强，不宣称复现官方训练结果。
 固定骨架沿用原 RTMW 布局，面部连接仍为简化链。
 
 ## 运行
@@ -45,14 +48,15 @@ python main.py --archive ../HumanActionParticipationModeling/data/ntu120_skeleto
 python main.py --batch-size 32 --num-workers 8 --epochs 100
 ```
 
-先检查真实数据的精细阶段训练、验证和保存链路：
+先检查真实数据的双分支训练、验证和保存链路：
 
 ```bash
-python main.py --archive ../HumanActionParticipationModeling/data/ntu120_skeletons_rtmw.zip --epochs 1 --fine-start-epoch 0 --max-samples 4 --batch-size 2 --window-size 8 --num-workers 0 --device cpu --save-dir outputs/smoke
+python main.py --archive ../HumanActionParticipationModeling/data/ntu120_skeletons_rtmw.zip --epochs 1 --aux-start-epoch 0 --max-samples 4 --batch-size 2 --window-size 8 --num-workers 0 --device cpu --save-dir outputs/smoke_ctr32_aux133
 ```
 
 `python -m isaa.train` 和 `python isaa/train.py` 也可启动同一训练程序。
-数据及输出的相对路径均以 ISAA 根目录为基准；默认输出为 `outputs/xsub120/last.pt`、`best.pt`。
+数据及输出的相对路径均以 ISAA 根目录为基准；默认输出为 `outputs/rtmw_ctr32_aux133_v2/xsub120/last.pt`、`best.pt`。
+checkpoint 的 architecture 为 `rtmw_ctr32_aux133_v2`；结构与旧版不兼容，需要重新训练，默认目录避免覆盖旧实验。
 保留原双行进度条、时间戳、Top1/Top5/loss、吞吐和数据等待时间输出。
 CUDA 默认启用 TF32、固定尺寸卷积优化、常驻 worker、预取和非阻塞传输。
 入口每次从头训练；同一输出目录的 checkpoint 会被更新，目前没有断点续训参数。
@@ -64,12 +68,18 @@ CUDA 默认启用 TF32、固定尺寸卷积优化、常驻 worker、预取和非
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
 
 model = RTMWLocalCTR(num_classes=120)
-model.set_fine_enabled(True)
+model.set_fine_enabled(True)  # Enable the auxiliary branch (default).
 result = model(x, valid_frame_mask, return_node_features=True)
-# logits, node_features, node_mask, node_indices
+# node_features: B x M x 256 x ceil(T/4) x 32
+# node_indices: original RTMW indices of the 32 main joints
+# time_indices: 0, 4, 8, ... (input-frame anchors, not isolated-frame features)
+# auxiliary_node_features: B x M x 16 x T x 133
+# auxiliary_node_mask / auxiliary_node_indices: original observation mask / indices
 ```
 
-可导出逐节点、逐帧表示用于后续动作分析。当前实现完成分类主干及特征接口；
+`node_mask` 与下采样后的主干特征对应；关闭辅助分支时所有 `auxiliary_node_*` 字段为 None。
+`set_fine_enabled` 只切换辅助分支，主干节点始终为 32。可导出两路不同分辨率的表示用于后续动作分析。
+当前实现完成分类主干及特征接口；
 特征值和 CTR 边权本身不等于节点贡献或因果解释，可解释性评估仍属于后续研究。
 归一化会移除整体平移与尺度变化，需结合动作类别评估其影响。
 
@@ -78,7 +88,7 @@ result = model(x, valid_frame_mask, return_node_features=True)
 ```text
 main.py                      主研究入口
 isaa/train.py                训练、验证、checkpoint
-isaa/models/rtmw_local_ctr.py 固定局部图与主节点 CTR 模型
+isaa/models/rtmw_local_ctr.py 32 点 CTR-GCN 主干与 133 点辅助分支
 isaa/data/                   ZIP 数据读取与相对坐标预处理
 isaa/layouts/                原 RTMW 主节点、区域归属和骨架连接
 isaa/graph/                  固定图构建
@@ -89,8 +99,11 @@ outputs/                     训练输出
 
 ## 当前验证记录
 
-2026-09-07：通过 25 个 Python 文件的语法与独立导入路径检查、实际布局自动注册、
-32 个主节点及 133 点归属检查、默认训练参数和入口转发检查；
-读取原目录 ZIP 的一个真实样本，确认坐标与置信度形状符合数据接口。
-本机缺少 PyTorch，安装尝试未找到可用包，模型测试在导入 torch 时中止。
+本次结构更新：`compileall` 语法检查和 `git diff --check` 通过。
+测试已覆盖 32 点 CTR/时间主干、两层固定图辅助分支、细节点梯度、奇数帧下采样、
+缺失点及 padding、辅助开关、特征索引、checkpoint 往返和训练指标。
+当前 Python 环境缺少 PyTorch；安装未找到可用包，测试在导入 torch 时中止，不能视为测试通过。
 尚未验证前向、反向、CUDA 吞吐或真实训练效果。
+
+按默认通道、64 帧、单人单样本估算主要前向乘加量约 1.41 G MAC，其中辅助分支约 0.116 G。
+该估算忽略归一化、激活及池化等操作；不代表实测速度、训练耗时或显存用量。

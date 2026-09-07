@@ -1,4 +1,4 @@
-"""Train fixed-local / main-node CTR on the existing NTU120 RTMW ZIP dataset."""
+"""Train a 32-node CTR-GCN backbone with a fixed 133-node auxiliary branch."""
 
 from __future__ import annotations
 
@@ -38,8 +38,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--fine-start-epoch", type=int, default=0,
-                        help="Use only 32 main joints through this epoch; 0 enables the fixed 133-node graph immediately")
+    parser.add_argument("--aux-start-epoch", "--fine-start-epoch", dest="fine_start_epoch", type=int, default=0,
+                        help="Enable the 133-node auxiliary branch after this epoch; 0 enables it immediately")
+    parser.add_argument("--auxiliary-channels", type=int, default=16,
+                        help="Width of the two fixed-graph auxiliary layers")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Default: up to 8 on CUDA, 0 on CPU; 0 disables workers")
@@ -53,8 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true", help="Synthetic forward check; no ZIP needed")
     args = parser.parse_args()
-    if min(args.num_classes, args.window_size, args.batch_size, args.epochs) < 1:
-        parser.error("num-classes, window-size, batch-size and epochs must be positive")
+    if min(args.num_classes, args.window_size, args.batch_size, args.epochs, args.auxiliary_channels) < 1:
+        parser.error("num-classes, window-size, batch-size, epochs and auxiliary-channels must be positive")
     if args.fine_start_epoch < 0:
         parser.error("fine-start-epoch must be >= 0")
     if ((args.num_workers is not None and args.num_workers < 0)
@@ -156,8 +158,9 @@ def main() -> None:
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
-    model = RTMWLocalCTR(num_classes=args.num_classes).to(device)
-    print(f"ISAA RTMWLocalCTR local_graph=fixed_133 coordination=ctr_32 device={device} "
+    model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels).to(device)
+    print(f"ISAA {model.ARCHITECTURE} backbone=ctr_gcn_32 auxiliary=fixed_133 "
+          f"auxiliary_channels={args.auxiliary_channels} device={device} "
           f"parameters={sum(p.numel() for p in model.parameters()):,}",
           flush=True)
     if device.type == "cuda":
@@ -171,9 +174,11 @@ def main() -> None:
         x[:, 2] = 1
         model.eval()
         with torch.no_grad():
-            logits = model(x)
-        print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} finite="
-              f"{torch.isfinite(logits).all().item()}")
+            result = model(x, return_node_features=True)
+        print(f"input={tuple(x.shape)} logits={tuple(result['logits'].shape)} "
+              f"main_features={tuple(result['node_features'].shape)} "
+              f"auxiliary_features={tuple(result['auxiliary_node_features'].shape)} "
+              f"finite={torch.isfinite(result['logits']).all().item()}")
         return
 
     archive = Path(args.archive)
@@ -196,7 +201,8 @@ def main() -> None:
         )
         print(f"{split}: {len(dataset)} samples ({args.split})", flush=True)
 
-    save_dir = Path(args.save_dir) if args.save_dir else PROJECT_ROOT / "outputs" / args.split
+    save_dir = (Path(args.save_dir) if args.save_dir else
+                PROJECT_ROOT / "outputs" / model.ARCHITECTURE / args.split)
     if not save_dir.is_absolute():
         save_dir = PROJECT_ROOT / save_dir
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +221,7 @@ def main() -> None:
             "completed_before": completed_before,
         }
         finish_progress_lines()
-        stage = "fixed_133+ctr_32" if model.fine_enabled else "coarse_32"
+        stage = "ctr32+aux133" if model.fine_enabled else "ctr32_only"
         print(f"Training epoch: {epoch}/{args.epochs} stage={stage} "
               f"lr={optimizer.param_groups[0]['lr']:.8g}", flush=True)
         train_metrics = run_epoch(
@@ -249,7 +255,7 @@ def main() -> None:
         checkpoint = {
             "epoch": epoch, "model": model.state_dict(), "optimizer": optimizer.state_dict(),
             "args": vars(args), "val_loss": val_loss, "val_accuracy": val_accuracy,
-            "best_accuracy": best_accuracy, "architecture": "rtmw_local_ctr",
+            "best_accuracy": best_accuracy, "architecture": model.ARCHITECTURE,
             "stage": stage,
         }
         torch.save(checkpoint, save_dir / "last.pt")
