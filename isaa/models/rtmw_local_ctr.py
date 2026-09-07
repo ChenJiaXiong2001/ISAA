@@ -60,14 +60,10 @@ class FixedSkeletonConv(nn.Module):
 
 
 class MainNodeCTR(ChannelWiseTopologyGraphConv):
-    """Reuse CTR projections, allowing dynamic links between every pair of main joints.
+    """CTR-GCN spatial unit with unrestricted, channel-wise dynamic topology."""
 
-    The original ctr_channel masks refinements to skeleton edges. This variant
-    deliberately has no such restriction, and operates only on the 32 main nodes.
-    """
-
-    def __init__(self, channels: int, adjacency: torch.Tensor) -> None:
-        super().__init__(channels, channels, adjacency, diagonal_fast_path=False)
+    def __init__(self, in_channels: int, out_channels: int, adjacency: torch.Tensor) -> None:
+        super().__init__(in_channels, out_channels, adjacency, diagonal_fast_path=False)
         # Parent buffers use source/target order. This implementation uses target/source.
         self.base_topology.copy_(adjacency)
         self.topology_mask.fill_(1)
@@ -87,51 +83,43 @@ class MainNodeCTR(ChannelWiseTopologyGraphConv):
 
 
 class LocalCoordinationBlock(nn.Module):
-    """Fixed local messages, 32-node coordination, temporal convolution, residual."""
+    """CTR-GCN style spatial branches followed by multi-scale temporal fusion."""
 
     def __init__(self, in_channels, out_channels, joint_graph, main_graph, centers, owners, dilation=1):
         super().__init__()
         self.register_buffer("centers", centers.clone())
         self.register_buffer("owners", owners.clone())
-        self.local = FixedSkeletonConv(in_channels, out_channels, joint_graph)
-        self.coarse_projection = nn.Conv2d(in_channels, out_channels, 1, bias=False)
-        self.local_norm = PointBatchNorm(out_channels)
-        self.main_norm = PointBatchNorm(out_channels)
-        self.main_ctr = nn.ModuleList([MainNodeCTR(out_channels, graph) for graph in main_graph])
-        self.temporal = nn.Conv2d(out_channels, out_channels, (3, 1),
-                                  padding=(dilation, 0), dilation=(dilation, 1), bias=False)
+        # CTR-GCN applies channel-wise topology refinement to every node and
+        # keeps the three spatial partitions as separate branches.
+        self.spatial_ctr = nn.ModuleList([
+            MainNodeCTR(in_channels, out_channels, graph)
+            for graph in joint_graph
+        ])
+        self.temporal = nn.ModuleList([
+            nn.Conv2d(out_channels, out_channels, (3, 1),
+                      padding=(dilation, 0), dilation=(dilation, 1), bias=False),
+            nn.Conv2d(out_channels, out_channels, (5, 1),
+                      padding=(2 * dilation, 0), dilation=(dilation, 1), bias=False),
+            nn.Conv2d(out_channels, out_channels, (1, 1), bias=False),
+            nn.Conv2d(out_channels, out_channels, (3, 1),
+                      padding=(dilation, 0), dilation=(dilation, 1), bias=False),
+        ])
         self.temporal_norm = PointBatchNorm(out_channels)
         self.residual = (nn.Identity() if in_channels == out_channels
                          else nn.Conv2d(in_channels, out_channels, 1, bias=False))
         self.act = nn.ReLU()
 
-    def forward(self, x, mask, *, fine_enabled):
+    def forward(self, x, mask, *, fine_enabled=True):
         residual = self.residual(x).masked_fill(~mask, 0)
-        if fine_enabled:
-            local = self.act(self.local_norm(self.local(x), mask))
-            main = local.index_select(-1, self.centers)
-            main_mask = mask.index_select(-1, self.centers)
-        else:
-            main_mask = mask
-            main = self.act(self.main_norm(self.coarse_projection(x), mask))
-        context = sum(branch(main, main_mask) for branch in self.main_ctr)
-        if fine_enabled:
-            # Each real joint receives its main node's coordinated context, without region pooling.
-            spatial = local + context.index_select(-1, self.owners)
-        else:
-            spatial = main + context
+        spatial = sum(branch(x, mask) for branch in self.spatial_ctr)
         spatial = self.act(spatial).masked_fill(~mask, 0)
-        temporal = self.temporal_norm(self.temporal(spatial), mask)
+        temporal = sum(branch(spatial) for branch in self.temporal)
+        temporal = self.temporal_norm(temporal, mask)
         return self.act(temporal + residual).masked_fill(~mask, 0)
 
 
 class RTMWLocalCTR(nn.Module):
-    """B x 3 x T x 133 [x_relative, y_relative, score], optionally x M -> logits.
-
-    Ten spatiotemporal blocks retain individual joints. Only the 32 actual center
-    joints generate learned all-pairs graphs. This is an RTMW adaptation, not the
-    original CTR-GCN architecture. The stage flag is persisted in state_dict.
-    """
+    """CTR-GCN style full-node RTMW-133 classifier with mask-aware input handling."""
 
     DEFAULT_CHANNELS = (64, 64, 64, 96, 128, 128, 128, 192, 256, 256)
 
@@ -147,8 +135,10 @@ class RTMWLocalCTR(nn.Module):
         owners = torch.tensor(partition.joint_to_region, dtype=torch.long)
         self.register_buffer("main_joint_indices", centers)
         self.register_buffer("joint_to_main", owners)
-        self.register_buffer("fine_stage", torch.tensor(False))
-        self._fine_enabled = False
+        # Full-node CTR is the default path, matching the original CTR-GCN
+        # topology refinement granularity.
+        self.register_buffer("fine_stage", torch.tensor(True))
+        self._fine_enabled = True
         self.register_load_state_dict_post_hook(self._restore_stage)
         graph = build_joint_spatial_partitions(133, partition, "rtmw_133", scope="full")
         main_graph = normalize_adjacency_partitions(graph.index_select(1, centers).index_select(2, centers))
@@ -192,11 +182,8 @@ class RTMWLocalCTR(nn.Module):
         x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, n)
         mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, n)
         x = x.masked_fill(~mask, 0)
-        if not self.fine_enabled:
-            x = x.index_select(-1, self.main_joint_indices)
-            mask = mask.index_select(-1, self.main_joint_indices)
         for block in self.blocks:
-            x = block(x, mask, fine_enabled=self.fine_enabled)
+            x = block(x, mask, fine_enabled=True)
         nodes = x.size(-1)
         features = x.reshape(b, m, x.size(1), t, nodes)
         point_mask = mask.reshape(b, m, 1, t, nodes)
@@ -205,6 +192,5 @@ class RTMWLocalCTR(nn.Module):
         logits = self.classifier(pooled)
         if return_node_features:
             return {"logits": logits, "node_features": features, "node_mask": point_mask,
-                    "node_indices": (torch.arange(133, device=x.device) if self.fine_enabled
-                                     else self.main_joint_indices)}
+                    "node_indices": torch.arange(133, device=x.device)}
         return logits
