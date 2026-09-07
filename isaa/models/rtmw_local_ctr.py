@@ -1,0 +1,210 @@
+"""RTMW experiment: fixed local graphs and CTR coordination on 32 real joints."""
+
+from __future__ import annotations
+
+import torch
+from torch import nn
+
+from isaa.graph.adjacency import build_joint_spatial_partitions, normalize_adjacency_partitions
+from isaa.graph.regions import build_region_partition
+from isaa.models.graph_convs.ctr_channel import ChannelWiseTopologyGraphConv
+from isaa.models.normalization import _masked_stats_chunk_size
+
+
+class PointBatchNorm(nn.Module):
+    """Exclude missing nodes/frames/people; use running statistics in evaluation."""
+
+    def __init__(self, channels: int) -> None:
+        super().__init__()
+        self.bn = nn.BatchNorm2d(channels)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if not self.training:
+            return self.bn(x).masked_fill(~mask, 0)
+        stats = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
+        weight = mask.to(stats.dtype)
+        count = weight.sum()
+        chunk_size = _masked_stats_chunk_size(stats.size(0), stats[0].numel())
+        sums, squares = [], []
+        for start in range(0, stats.size(0), chunk_size):
+            chunk = stats[start:start + chunk_size].masked_fill(~mask[start:start + chunk_size], 0)
+            sums.append(chunk.sum(dim=(0, 2, 3)))
+            squares.append(chunk.square().sum(dim=(0, 2, 3)))
+        mean = torch.stack(sums).sum(0) / count.clamp_min(1)
+        var = (torch.stack(squares).sum(0) / count.clamp_min(1) - mean.square()).clamp_min(0)
+        with torch.no_grad():
+            # Empty branches leave running statistics untouched, including on CUDA.
+            update = (count > 0).to(mean.dtype) * self.bn.momentum
+            self.bn.num_batches_tracked.add_((count > 0).long())
+            unbiased = var * count / (count - 1).clamp_min(1)
+            self.bn.running_mean.lerp_(mean.detach(), update)
+            self.bn.running_var.lerp_(unbiased.detach(), update)
+        out = (stats - mean[None, :, None, None]) * torch.rsqrt(var[None, :, None, None] + self.bn.eps)
+        out = out * self.bn.weight[None, :, None, None] + self.bn.bias[None, :, None, None]
+        return out.to(x.dtype).masked_fill(~mask, 0)
+
+
+class FixedSkeletonConv(nn.Module):
+    """Self/inward/outward projections with frozen RTMW connectivity."""
+
+    def __init__(self, in_channels: int, out_channels: int, adjacency: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("adjacency", adjacency.clone())
+        self.projection = nn.Conv2d(in_channels, 3 * out_channels, 1, bias=False)
+        self.out_channels = out_channels
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, _, t, n = x.shape
+        projected = self.projection(x).reshape(b, 3, self.out_channels, t, n)
+        return torch.einsum("bpctv,puv->bctu", projected, self.adjacency)
+
+
+class MainNodeCTR(ChannelWiseTopologyGraphConv):
+    """Reuse CTR projections, allowing dynamic links between every pair of main joints.
+
+    The original ctr_channel masks refinements to skeleton edges. This variant
+    deliberately has no such restriction, and operates only on the 32 main nodes.
+    """
+
+    def __init__(self, channels: int, adjacency: torch.Tensor) -> None:
+        super().__init__(channels, channels, adjacency, diagonal_fast_path=False)
+        # Parent buffers use source/target order. This implementation uses target/source.
+        self.base_topology.copy_(adjacency)
+        self.topology_mask.fill_(1)
+        self.static_topology = nn.Parameter(adjacency.clone())
+        self.proj_norm = PointBatchNorm(channels)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        weight = mask.to(x.dtype)
+        count = weight.sum(dim=2).clamp_min(1)
+        query = (self.theta(x) * weight).sum(dim=2) / count
+        key = (self.phi(x) * weight).sum(dim=2) / count
+        relation = torch.tanh(query.unsqueeze(-1) - key.unsqueeze(-2))
+        topology = self.static_topology[None, None] + self.topology_alpha * self.relation_proj(relation)
+        feature = self.feature_proj(x).masked_fill(~mask, 0)
+        out = torch.einsum("bcuv,bctv->bctu", topology, feature)
+        return self.proj_act(self.proj_norm(out, mask)).masked_fill(~mask, 0)
+
+
+class LocalCoordinationBlock(nn.Module):
+    """Fixed local messages, 32-node coordination, temporal convolution, residual."""
+
+    def __init__(self, in_channels, out_channels, joint_graph, main_graph, centers, owners, dilation=1):
+        super().__init__()
+        self.register_buffer("centers", centers.clone())
+        self.register_buffer("owners", owners.clone())
+        self.local = FixedSkeletonConv(in_channels, out_channels, joint_graph)
+        self.coarse_projection = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.local_norm = PointBatchNorm(out_channels)
+        self.main_norm = PointBatchNorm(out_channels)
+        self.main_ctr = nn.ModuleList([MainNodeCTR(out_channels, graph) for graph in main_graph])
+        self.temporal = nn.Conv2d(out_channels, out_channels, (3, 1),
+                                  padding=(dilation, 0), dilation=(dilation, 1), bias=False)
+        self.temporal_norm = PointBatchNorm(out_channels)
+        self.residual = (nn.Identity() if in_channels == out_channels
+                         else nn.Conv2d(in_channels, out_channels, 1, bias=False))
+        self.act = nn.ReLU()
+
+    def forward(self, x, mask, *, fine_enabled):
+        residual = self.residual(x).masked_fill(~mask, 0)
+        if fine_enabled:
+            local = self.act(self.local_norm(self.local(x), mask))
+            main = local.index_select(-1, self.centers)
+            main_mask = mask.index_select(-1, self.centers)
+        else:
+            main_mask = mask
+            main = self.act(self.main_norm(self.coarse_projection(x), mask))
+        context = sum(branch(main, main_mask) for branch in self.main_ctr)
+        if fine_enabled:
+            # Each real joint receives its main node's coordinated context, without region pooling.
+            spatial = local + context.index_select(-1, self.owners)
+        else:
+            spatial = main + context
+        spatial = self.act(spatial).masked_fill(~mask, 0)
+        temporal = self.temporal_norm(self.temporal(spatial), mask)
+        return self.act(temporal + residual).masked_fill(~mask, 0)
+
+
+class RTMWLocalCTR(nn.Module):
+    """B x 3 x T x 133 [x_relative, y_relative, score], optionally x M -> logits.
+
+    Ten spatiotemporal blocks retain individual joints. Only the 32 actual center
+    joints generate learned all-pairs graphs. This is an RTMW adaptation, not the
+    original CTR-GCN architecture. The stage flag is persisted in state_dict.
+    """
+
+    DEFAULT_CHANNELS = (64, 64, 64, 96, 128, 128, 128, 192, 256, 256)
+
+    def __init__(self, num_classes: int = 120, *, channels=None) -> None:
+        super().__init__()
+        if num_classes < 1:
+            raise ValueError("num_classes must be positive")
+        channels = tuple(self.DEFAULT_CHANNELS if channels is None else channels)
+        if not channels or any(c < 1 for c in channels):
+            raise ValueError("channels must be a nonempty sequence of positive integers")
+        partition = build_region_partition("rtmw_133", 133)
+        centers = torch.tensor(partition.center_joint_indices, dtype=torch.long)
+        owners = torch.tensor(partition.joint_to_region, dtype=torch.long)
+        self.register_buffer("main_joint_indices", centers)
+        self.register_buffer("joint_to_main", owners)
+        self.register_buffer("fine_stage", torch.tensor(False))
+        self._fine_enabled = False
+        self.register_load_state_dict_post_hook(self._restore_stage)
+        graph = build_joint_spatial_partitions(133, partition, "rtmw_133", scope="full")
+        main_graph = normalize_adjacency_partitions(graph.index_select(1, centers).index_select(2, centers))
+        self.register_buffer("joint_graph", graph)
+        self.register_buffer("main_graph", main_graph)
+        self.blocks = nn.ModuleList()
+        in_channels = 3
+        for index, out_channels in enumerate(channels):
+            self.blocks.append(LocalCoordinationBlock(
+                in_channels, out_channels, graph, main_graph, centers, owners,
+                dilation=1 if index < 7 else (2 if index < 9 else 4),
+            ))
+            in_channels = out_channels
+        # Keep the trained head across the coarse/fine boundary.
+        self.classifier = nn.Linear(channels[-1], num_classes)
+
+    @property
+    def fine_enabled(self) -> bool:
+        return self._fine_enabled
+
+    def _restore_stage(self, module, incompatible_keys) -> None:
+        self._fine_enabled = bool(self.fine_stage.item())
+
+    def set_fine_enabled(self, enabled: bool) -> None:
+        self._fine_enabled = bool(enabled)
+        self.fine_stage.fill_(self._fine_enabled)
+
+    def forward(self, x, valid_frame_mask=None, *, return_node_features=False):
+        if x.ndim == 4:
+            x = x.unsqueeze(-1)
+        if x.ndim != 5 or x.size(1) != 3 or x.size(3) != 133:
+            raise ValueError("Expected B x 3 x T x 133 [relative x, relative y, score], optionally x M")
+        b, c, t, n, m = x.shape
+        if min(b, t, m) <= 0:
+            raise ValueError("Batch, frame and person dimensions must be nonempty")
+        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(dim=1, keepdim=True)
+        if valid_frame_mask is not None:
+            if valid_frame_mask.shape != (b, t):
+                raise ValueError("valid_frame_mask must have shape B x T")
+            mask = mask & valid_frame_mask.to(device=x.device, dtype=torch.bool)[:, None, :, None, None]
+        x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, n)
+        mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, n)
+        x = x.masked_fill(~mask, 0)
+        if not self.fine_enabled:
+            x = x.index_select(-1, self.main_joint_indices)
+            mask = mask.index_select(-1, self.main_joint_indices)
+        for block in self.blocks:
+            x = block(x, mask, fine_enabled=self.fine_enabled)
+        nodes = x.size(-1)
+        features = x.reshape(b, m, x.size(1), t, nodes)
+        point_mask = mask.reshape(b, m, 1, t, nodes)
+        count = point_mask.sum(dim=(1, 3, 4)).clamp_min(1)
+        pooled = features.sum(dim=(1, 3, 4)) / count
+        logits = self.classifier(pooled)
+        if return_node_features:
+            return {"logits": logits, "node_features": features, "node_mask": point_mask,
+                    "node_indices": (torch.arange(133, device=x.device) if self.fine_enabled
+                                     else self.main_joint_indices)}
+        return logits
