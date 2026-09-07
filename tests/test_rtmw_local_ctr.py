@@ -9,7 +9,9 @@ from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from isaa.data.transforms import build_skeleton_feature_channels
-from isaa.models.rtmw_local_ctr import FixedSkeletonConv, MainNodeCTR, RTMWLocalCTR, _downsample_mask
+from isaa.models.rtmw_local_ctr import (
+    AuxiliarySkeleton, FixedSkeletonConv, MainNodeCTR, RegionalDetailPool, RTMWLocalCTR, _downsample_mask,
+)
 from isaa.train import collate_rtmw, parse_args, run_epoch
 
 
@@ -117,7 +119,9 @@ class RTMWLocalCTRTests(unittest.TestCase):
             self.assertEqual(grad is not None, fine)
             if fine:
                 self.assertGreater(grad.abs().sum().item(), 0)
-                self.assertGreater(self.model.auxiliary_projection.weight.grad.abs().sum().item(), 0)
+                self.assertGreater(self.model.auxiliary_to_main.weight.grad.abs().sum().item(), 0)
+                self.assertGreater(self.model.auxiliary.temporal.weight.grad.abs().sum().item(), 0)
+                self.assertGreater(self.model.regional_pool.score.weight.grad.abs().sum().item(), 0)
             self.assertIsNotNone(self.model.blocks[0].gcn.static_topology.grad)
             optimizer.step()
         for expected, layer in zip(original, self.model.auxiliary.layers):
@@ -214,13 +218,125 @@ class RTMWLocalCTRTests(unittest.TestCase):
             frames = torch.tensor([[True] * 5 + [False] * 5] * 2)
             torch.testing.assert_close(padded_model(padded, frames), expected, rtol=2e-4, atol=2e-5)
 
-    def test_auxiliary_switch_leaves_main_features_unchanged(self):
+    def test_auxiliary_switch_changes_main_features_through_early_fusion(self):
         self.model.eval()
         enabled = self.model(self.x, return_node_features=True)
         self.model.set_fine_enabled(False)
         disabled = self.model(self.x, return_node_features=True)
-        torch.testing.assert_close(enabled["node_features"], disabled["node_features"])
+        self.assertFalse(torch.allclose(enabled["node_features"], disabled["node_features"]))
         self.assertFalse(torch.allclose(enabled["logits"], disabled["logits"]))
+
+    def test_sparse_fixed_graph_matches_dense_forward_and_gradients(self):
+        graph = torch.tensor([[[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+                              [[0., .25, .75], [0., 0., 0.], [0., 1., 0.]],
+                              [[0., 0., 0.], [.5, 0., .5], [1., 0., 0.]]])
+        sparse = FixedSkeletonConv(2, 4, graph)
+        dense = copy.deepcopy(sparse)
+        x = torch.randn(2, 2, 5, 3, requires_grad=True)
+        reference_x = x.detach().clone().requires_grad_()
+        actual = sparse(x)
+        projected = dense.projection(reference_x).reshape(2, 3, 4, 5, 3)
+        expected = torch.einsum("bpctv,puv->bctu", projected, graph)
+        torch.testing.assert_close(actual, expected)
+        actual.square().sum().backward()
+        expected.square().sum().backward()
+        torch.testing.assert_close(x.grad, reference_x.grad)
+        torch.testing.assert_close(sparse.projection.weight.grad, dense.projection.weight.grad)
+        state = sparse.state_dict()
+        state["adjacency"] = torch.zeros_like(graph)
+        state["adjacency"][0, 0, 2] = 2
+        sparse.load_state_dict(state)
+        self.assertEqual(sparse.edge_weights.numel(), 1)
+        projected = sparse.projection(x).reshape(2, 3, 4, 5, 3)
+        expected = torch.einsum("bpctv,puv->bctu", projected, state["adjacency"])
+        torch.testing.assert_close(sparse(x), expected)
+
+    def test_region_pool_uses_valid_counts_and_does_not_mix_regions(self):
+        pool = RegionalDetailPool(1, torch.tensor([0, 0, 0, 1]), 3)
+        with torch.no_grad():
+            pool.score.weight.zero_()
+        x = torch.tensor([[[[2., 999., 6., 10.], [4., 8., 999., 20.]]]], requires_grad=True)
+        mask = torch.tensor([[[[True, False, True, True], [True, True, False, False]]]])
+        values, valid = pool(x, mask)
+        expected = torch.tensor([[[[4., 10., 0.], [6., 0., 0.]],
+                                  [[4., 10., 0.], [6., 0., 0.]]]])
+        torch.testing.assert_close(values, expected)
+        torch.testing.assert_close(valid, torch.tensor([[[[True, True, False], [True, False, False]]]]))
+        changed = x.detach().clone()
+        changed[..., 3] += 100
+        torch.testing.assert_close(pool(changed, mask)[0][..., 0], values[..., 0])
+        values.sum().backward()
+        self.assertTrue(torch.isfinite(x.grad).all())
+        self.assertTrue((x.grad[mask] > 0).all())
+        self.assertTrue((x.grad[~mask] == 0).all())
+        self.assertTrue(torch.isfinite(pool.score.weight.grad).all())
+
+    def test_region_attention_learns_and_empty_regions_stay_finite(self):
+        pool = RegionalDetailPool(1, torch.tensor([0, 0, 1]), 2)
+        x = torch.tensor([[[[1., 3., 999.]]]], requires_grad=True)
+        mask = torch.tensor([[[[True, True, False]]]])
+        with torch.no_grad():
+            pool.score.weight.fill_(1)
+        values, valid = pool(x, mask)
+        self.assertGreater(values[0, 1, 0, 0].item(), values[0, 0, 0, 0].item())
+        self.assertEqual(values[..., 1].abs().sum().item(), 0)
+        values.sum().backward()
+        self.assertGreater(pool.score.weight.grad.abs().sum().item(), 0)
+        empty, empty_mask = pool(x, torch.zeros_like(mask))
+        self.assertEqual(empty.abs().sum().item(), 0)
+        self.assertFalse(empty_mask.any())
+        empty.sum().backward()
+        self.assertTrue(torch.isfinite(x.grad).all())
+
+    def test_auxiliary_temporal_order_and_residual(self):
+        auxiliary = AuxiliarySkeleton(torch.eye(2).repeat(3, 1, 1), 2).eval()
+        with torch.no_grad():
+            for layer in auxiliary.layers:
+                layer.projection.weight.fill_(.1)
+            auxiliary.temporal.weight.zero_()
+            auxiliary.temporal.weight[:, :, 1, 0] = 1
+            auxiliary.temporal_mix.weight.fill_(.5)
+        x = torch.rand(1, 3, 6, 2)
+        mask = torch.ones(1, 1, 6, 2, dtype=torch.bool)
+        self.assertEqual(auxiliary.temporal.groups, 2)
+        actual = auxiliary(x, mask)
+        reversed_back = auxiliary(x.flip(2), mask).flip(2)
+        self.assertFalse(torch.allclose(actual, reversed_back))
+        with torch.no_grad():
+            auxiliary.temporal.weight.zero_()
+        reference = x
+        for layer, norm in zip(auxiliary.layers, auxiliary.norms):
+            reference = torch.relu(norm(layer(reference), mask))
+        torch.testing.assert_close(auxiliary(x, mask), reference)
+
+    def test_missing_center_still_receives_valid_regional_details(self):
+        self.model.eval()
+        x = self.x.clone()
+        x[:, 2, :, self.model.main_joint_indices] = 0
+        output = self.model(x, return_node_features=True)
+        self.assertTrue(output["regional_mask"].any())
+        self.assertTrue(output["node_mask"].any())
+        self.assertGreater(output["node_features"].abs().sum().item(), 0)
+        self.model.set_fine_enabled(False)
+        torch.testing.assert_close(self.model(x), self.model.classifier.bias.expand(2, -1))
+
+    def test_detail_fuses_once_after_first_block_with_temporal_regions(self):
+        self.model.eval()
+        captured = {}
+        hooks = [
+            self.model.blocks[0].register_forward_hook(
+                lambda module, args, out: captured.update(before=out[0].detach().clone())),
+            self.model.blocks[1].register_forward_pre_hook(
+                lambda module, args: captured.update(after=args[0].detach().clone())),
+        ]
+        out = self.model(self.x, return_node_features=True)
+        for hook in hooks:
+            hook.remove()
+        self.assertEqual(out["regional_features"].shape, (2, 2, 32, 5, 32))
+        self.assertEqual(out["regional_mask"].shape, (2, 2, 1, 5, 32))
+        regional = out["regional_features"].reshape(4, 32, 5, 32)
+        expected = captured["before"] + self.model.auxiliary_scale * self.model.auxiliary_to_main(regional)
+        torch.testing.assert_close(captured["after"], expected)
 
     def test_entry_auxiliary_options_and_legacy_alias(self):
         for flag in ("--aux-start-epoch", "--fine-start-epoch"):

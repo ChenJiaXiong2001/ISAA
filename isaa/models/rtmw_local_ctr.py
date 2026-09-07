@@ -1,4 +1,4 @@
-"""32-joint CTR-GCN backbone with a shallow fixed RTMW-133 auxiliary graph."""
+"""32-joint CTR-GCN with low-width RTMW-133 spatiotemporal region fusion."""
 
 from __future__ import annotations
 
@@ -59,15 +59,35 @@ class FixedSkeletonConv(nn.Module):
         self.register_buffer("adjacency", adjacency.clone())
         self.projection = nn.Conv2d(in_channels, 3 * out_channels, 1, bias=False)
         self.out_channels = out_channels
+        self.register_buffer("edge_partitions", torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("edge_targets", torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("edge_sources", torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("edge_weights", torch.empty(0), persistent=False)
+        self._refresh_edges()
+        self.register_load_state_dict_post_hook(self._restore_edges)
+
+    def _refresh_edges(self):
+        partitions, targets, sources = self.adjacency.nonzero(as_tuple=True)
+        self.edge_partitions, self.edge_targets, self.edge_sources = partitions, targets, sources
+        self.edge_weights = self.adjacency[partitions, targets, sources]
+
+    def _restore_edges(self, module, incompatible_keys):
+        self._refresh_edges()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, _, t, n = x.shape
         projected = self.projection(x).reshape(b, 3, self.out_channels, t, n)
-        return torch.einsum("bpctv,puv->bctu", projected, self.adjacency)
+        # Preserve the normalized target/source weights, without multiplying
+        # all 3 * N * N positions of the mostly empty adjacency tensor.
+        messages = projected.permute(0, 2, 3, 1, 4).flatten(3)
+        messages = messages.index_select(3, self.edge_partitions * n + self.edge_sources)
+        messages = messages * self.edge_weights.to(projected.dtype)[None, None, None, :]
+        out = projected.new_zeros(b, self.out_channels, t, n)
+        return out.index_add_(3, self.edge_targets, messages)
 
 
 class AuxiliarySkeleton(nn.Module):
-    """Two low-width fixed graph layers; no CTR or temporal convolution."""
+    """Low-width fixed graph layers plus depthwise temporal detail modeling."""
 
     def __init__(self, adjacency: torch.Tensor, channels: int) -> None:
         super().__init__()
@@ -76,11 +96,55 @@ class AuxiliarySkeleton(nn.Module):
             FixedSkeletonConv(channels, channels, adjacency),
         ])
         self.norms = nn.ModuleList([PointBatchNorm(channels) for _ in self.layers])
+        self.temporal = nn.Conv2d(channels, channels, (5, 1), padding=(2, 0),
+                                  groups=channels, bias=False)
+        self.temporal_mix = nn.Conv2d(channels, channels, 1, bias=False)
+        self.temporal_norm = PointBatchNorm(channels)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for layer, norm in zip(self.layers, self.norms):
             x = F.relu(norm(layer(x), mask)).masked_fill(~mask, 0)
-        return x
+        temporal = self.temporal_mix(self.temporal(x).masked_fill(~mask, 0))
+        return F.relu(x + self.temporal_norm(temporal, mask)).masked_fill(~mask, 0)
+
+
+class RegionalDetailPool(nn.Module):
+    """Per-frame regional mean plus masked learned attention; never mix regions."""
+
+    def __init__(self, channels, owners, num_regions):
+        super().__init__()
+        # Padded region membership is fixed metadata; a single gather and
+        # softmax process all regions without a Python loop in forward.
+        members = [torch.where(owners == index)[0] for index in range(num_regions)]
+        width = max(indices.numel() for indices in members)
+        indices = owners.new_zeros(num_regions, width)
+        member_mask = torch.zeros(num_regions, width, dtype=torch.bool, device=owners.device)
+        for index, joints in enumerate(members):
+            indices[index, :joints.numel()] = joints
+            member_mask[index, :joints.numel()] = True
+        self.register_buffer("member_indices", indices)
+        self.register_buffer("member_mask", member_mask)
+        self.score = nn.Conv2d(channels, 1, 1, bias=False)
+        self.num_regions = num_regions
+
+    def forward(self, x, mask):
+        b, c, t, _ = x.shape
+        indices = self.member_indices.flatten()
+        values = x.index_select(-1, indices).reshape(b, c, t, self.num_regions, -1)
+        valid = mask.index_select(-1, indices).reshape(b, 1, t, self.num_regions, -1)
+        valid = valid & self.member_mask[None, None, None]
+        values = values.masked_fill(~valid, 0)
+        count = valid.sum(-1)
+        region_mask = count > 0
+        mean = values.sum(-1) / count.clamp_min(1)
+        logits = self.score(x).index_select(-1, indices).reshape(b, 1, t, self.num_regions, -1)
+        # Softmax in FP32; empty regions receive finite logits before softmax,
+        # then all weights are zeroed, avoiding NaNs and invalid gradients.
+        logits = logits.float().masked_fill(~valid, float("-inf"))
+        logits = torch.where(region_mask.unsqueeze(-1), logits, torch.zeros_like(logits))
+        attention = logits.softmax(-1).masked_fill(~valid, 0).to(x.dtype)
+        weighted = (values * attention).sum(-1)
+        return torch.cat((mean, weighted), dim=1), region_mask
 
 
 class MainNodeCTR(nn.Module):
@@ -182,10 +246,10 @@ class CTRGCNBlock(nn.Module):
 
 
 class RTMWLocalCTR(nn.Module):
-    """32-node CTR-GCN classifier augmented by pooled fixed-skeleton details."""
+    """32-node CTR-GCN with early per-region fusion of all 133 joints."""
 
     DEFAULT_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
-    ARCHITECTURE = "rtmw_ctr32_aux133_v2"
+    ARCHITECTURE = "rtmw_ctr32_region133_v3"
 
     def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16) -> None:
         super().__init__()
@@ -215,7 +279,8 @@ class RTMWLocalCTR(nn.Module):
                                           stride=2 if index in (4, 7) else 1, residual=index != 0))
             in_channels = out_channels
         self.auxiliary = AuxiliarySkeleton(graph, auxiliary_channels)
-        self.auxiliary_projection = nn.Linear(auxiliary_channels, channels[-1], bias=False)
+        self.regional_pool = RegionalDetailPool(auxiliary_channels, self.joint_to_main, centers.numel())
+        self.auxiliary_to_main = nn.Conv2d(2 * auxiliary_channels, channels[0], 1, bias=False)
         self.auxiliary_scale = nn.Parameter(torch.tensor(0.1))
         self.classifier = nn.Linear(channels[-1], num_classes)
         self._initialize_weights()
@@ -269,21 +334,24 @@ class RTMWLocalCTR(nn.Module):
         x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, n)
         mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, n)
         x = x.masked_fill(~mask, 0)
+        auxiliary = self.auxiliary(x, mask) if self.fine_enabled else None
+        regional, region_mask = self.regional_pool(auxiliary, mask) if auxiliary is not None else (None, None)
         main = x.index_select(-1, self.main_joint_indices)
         main_mask = mask.index_select(-1, self.main_joint_indices)
         norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
         main = main.permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
         main = self.input_norm(main, norm_mask).reshape(b * m, c, 32, t).permute(0, 1, 3, 2)
         temporal_stride = 1
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
             main, main_mask = block(main, main_mask)
+            if index == 0 and regional is not None:
+                detail = self.auxiliary_to_main(regional).masked_fill(~region_mask, 0)
+                main = main + self.auxiliary_scale * detail
+                # A valid regional detail can represent a missing center joint.
+                main_mask = main_mask | region_mask
+                main = main.masked_fill(~main_mask, 0)
             temporal_stride *= block.stride
         pooled = self._pool(main, main_mask, b, m)
-        auxiliary = None
-        if self.fine_enabled:
-            auxiliary = self.auxiliary(x, mask)
-            detail = self.auxiliary_projection(self._pool(auxiliary, mask, b, m))
-            pooled = pooled + self.auxiliary_scale * detail
         logits = self.classifier(pooled)
         if return_node_features:
             return {
@@ -296,5 +364,7 @@ class RTMWLocalCTR(nn.Module):
                                             if auxiliary is not None else None),
                 "auxiliary_node_mask": mask.reshape(b, m, 1, t, n) if auxiliary is not None else None,
                 "auxiliary_node_indices": torch.arange(n, device=x.device) if auxiliary is not None else None,
+                "regional_features": regional.reshape(b, m, *regional.shape[1:]) if regional is not None else None,
+                "regional_mask": region_mask.reshape(b, m, *region_mask.shape[1:]) if region_mask is not None else None,
             }
         return logits
