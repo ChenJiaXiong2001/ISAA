@@ -42,6 +42,8 @@ def parse_args() -> argparse.Namespace:
                         help="Enable the 133-node auxiliary branch after this epoch; 0 enables it immediately")
     parser.add_argument("--auxiliary-channels", type=int, default=16,
                         help="Width of the two fixed-graph auxiliary layers")
+    parser.add_argument("--backbone-width", choices=tuple(RTMWLocalCTR.CHANNEL_PRESETS), default="compact",
+                        help="compact: 48/96/192 channels; standard: original 64/128/256")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Default: up to 8 on CUDA, 0 on CPU; 0 disables workers")
@@ -158,8 +160,10 @@ def main() -> None:
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
-    model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels).to(device)
-    print(f"ISAA {model.ARCHITECTURE} backbone=ctr_gcn_32 auxiliary=fixed_133 "
+    model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels,
+                         backbone_width=args.backbone_width).to(device)
+    print(f"ISAA {model.experiment_name} backbone=ctr_gcn_32 auxiliary=fixed_71 "
+          f"channels={model.channels} "
           f"auxiliary_channels={args.auxiliary_channels} device={device} "
           f"parameters={sum(p.numel() for p in model.parameters()):,}",
           flush=True)
@@ -202,7 +206,7 @@ def main() -> None:
         print(f"{split}: {len(dataset)} samples ({args.split})", flush=True)
 
     save_dir = (Path(args.save_dir) if args.save_dir else
-                PROJECT_ROOT / "outputs" / model.ARCHITECTURE / args.split)
+                PROJECT_ROOT / "outputs" / model.experiment_name / args.split)
     if not save_dir.is_absolute():
         save_dir = PROJECT_ROOT / save_dir
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -256,6 +260,8 @@ def main() -> None:
             "epoch": epoch, "model": model.state_dict(), "optimizer": optimizer.state_dict(),
             "args": vars(args), "val_loss": val_loss, "val_accuracy": val_accuracy,
             "best_accuracy": best_accuracy, "architecture": model.ARCHITECTURE,
+            "model_config": {"backbone_width": model.backbone_width, "channels": model.channels,
+                             "auxiliary_channels": args.auxiliary_channels, "num_classes": args.num_classes},
             "stage": stage,
         }
         torch.save(checkpoint, save_dir / "last.pt")

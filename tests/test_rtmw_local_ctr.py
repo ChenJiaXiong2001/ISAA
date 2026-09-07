@@ -207,11 +207,51 @@ class RTMWLocalCTRTests(unittest.TestCase):
     def test_default_channels_and_single_frame(self):
         model = RTMWLocalCTR(num_classes=6).eval()
         self.assertEqual([block.gcn.norm.bn.num_features for block in model.blocks],
-                         [64, 64, 64, 64, 128, 128, 128, 256, 256, 256])
+                         [48, 48, 48, 48, 96, 96, 96, 192, 192, 192])
         with torch.no_grad():
             out = model(self.x[:1, :, :1, :, :1], return_node_features=True)
-        self.assertEqual(out["node_features"].shape, (1, 1, 256, 1, 32))
+        self.assertEqual(out["node_features"].shape, (1, 1, 192, 1, 32))
         self.assertTrue(torch.isfinite(out["logits"]).all())
+
+    def test_width_presets_preserve_graphs_auxiliary_and_strides(self):
+        compact = RTMWLocalCTR(num_classes=6)
+        standard = RTMWLocalCTR(num_classes=6, backbone_width="standard")
+        self.assertEqual(standard.channels, RTMWLocalCTR.STANDARD_CHANNELS)
+        self.assertLess(sum(p.numel() for p in compact.parameters()),
+                        sum(p.numel() for p in standard.parameters()))
+        self.assertNotEqual(compact.experiment_name, standard.experiment_name)
+        for name in ("main_joint_indices", "joint_to_main", "joint_graph", "main_graph"):
+            torch.testing.assert_close(getattr(compact, name), getattr(standard, name))
+        self.assertEqual([block.stride for block in compact.blocks],
+                         [block.stride for block in standard.blocks])
+        self.assertEqual([tuple(p.shape) for p in compact.auxiliary.parameters()],
+                         [tuple(p.shape) for p in standard.auxiliary.parameters()])
+        self.assertEqual(compact.auxiliary_to_main.out_channels, 48)
+        self.assertEqual(standard.auxiliary_to_main.out_channels, 64)
+
+    def test_compact_training_and_checkpoint_roundtrip(self):
+        model = RTMWLocalCTR(num_classes=6).train()
+        loss = nn.functional.cross_entropy(model(self.x), torch.tensor([0, 4]))
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(model.classifier.weight.grad.abs().sum().item(), 0)
+        self.assertGreater(model.auxiliary_to_main.weight.grad.abs().sum().item(), 0)
+        for parameter in model.parameters():
+            if parameter.grad is not None:
+                self.assertTrue(torch.isfinite(parameter.grad).all())
+        model.eval()
+        restored = RTMWLocalCTR(num_classes=6, backbone_width="compact").eval()
+        restored.load_state_dict(model.state_dict())
+        with torch.no_grad():
+            torch.testing.assert_close(restored(self.x), model(self.x))
+
+    def test_entry_width_selection(self):
+        with patch("sys.argv", ["main.py"]):
+            self.assertEqual(parse_args().backbone_width, "compact")
+        with patch("sys.argv", ["main.py", "--backbone-width", "standard"]):
+            self.assertEqual(parse_args().backbone_width, "standard")
+        with self.assertRaises(ValueError):
+            RTMWLocalCTR(backbone_width="unknown")
 
     def test_strided_masks_padding_and_missing_odd_frames(self):
         mask = torch.tensor([False, True, False, False, True]).view(1, 1, 5, 1)

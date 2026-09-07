@@ -20,12 +20,15 @@ NTU120 在此仅表示动作数据集，读取的是其 RTMW-133 提取结果。
 - 辅助图：原图边映射到 71 点后去重，组内边折叠为 self 分支的单个自环；inward/outward 不保留折叠后的自环，三个分支重新行归一化。非面部边保留；两层固定图卷积的通道为 3->16->16，全部投影、聚合和空间 BN 均在 71 点上运行。
 - 细节时序：65 个非面部节点使用核 5 的 depthwise 时间卷积；6 个面部 token 使用核 3，均有 1x1 通道混合、独立 masked BN 和残差。通道数、时间长度不变，不向 68 个面部位置广播后再计算。
 - 区域汇总：直接在 71 点上按原有 32 区域归属逐帧计算有效 token 均值和区域内可学习 softmax 加权汇总，拼接为 32 通道区域特征。6 个面部 token 都属于原面部区域，均值按有效 token 数归一化，不按 token 内原始点数加权；空区域输出零。
-- 早期融合：区域特征投影到首个主干 block 的输出通道（默认 64），以可学习系数（初始 0.1）加到该 block 输出，只融合一次且早于首次时间下采样。真实主节点特征保留为主路径；中心缺失但区域有有效细节点时，融合后的主干位置仍有效。
+- 早期融合：区域特征投影到首个主干 block 的输出通道（compact 为 48，standard 为 64），以可学习系数（初始 0.1）加到该 block 输出，只融合一次且早于首次时间下采样。真实主节点特征保留为主路径；中心缺失但区域有有效细节点时，融合后的主干位置仍有效。
 - 分类：仅对融合后的 32 点主干做有效位置全局均值和分类。71 点辅助分支通过该分类损失训练，没有分类前全局辅助向量或额外分类损失。
 
 默认训练 **100 轮**，从第 1 轮同时启用两路。
 `--aux-start-epoch 5` 可在前 5 轮仅训练主干，第 6 轮启用辅助分支；旧参数 `--fine-start-epoch` 是同义别名。
-`--auxiliary-channels` 设置辅助宽度，默认 16。主干通道表为 `64,64,64,64,128,128,128,256,256,256`。
+`--auxiliary-channels` 设置辅助宽度，默认 16。
+本次轻量实验默认 `--backbone-width compact`：通道表为 `48,48,48,48,96,96,96,192,192,192`。
+`--backbone-width standard` 使用原通道表 `64,64,64,64,128,128,128,256,256,256` 进行对照。
+只调整主干通道及相应的融合投影/分类输入尺寸，节点、层数、时间下采样、面部压缩、辅助宽度和训练超参数保持一致。
 第 5、8 层时间 stride=2，64 帧变为 32、16 帧；节点数始终是 32。奇数长度向上取整，mask 按时间分箱取有效性并集。
 主干采用 CTR-GCN 的空间/时间模块组织；RTMW 输入、跨人共享的 masked 输入归一化、有效位置池化以及辅助分支属于项目适配，不能直接加载官方权重。
 辅助分支对身体/手/脚保留逐节点时序表示。仅请求分析输出时，面部 token 才广播到 133 点兼容视图；这不恢复独立的 68 点特征，压缩及区域汇总都有信息损失。当前仍使用 Adam 和原项目数据增强，不宣称复现官方训练结果。
@@ -53,6 +56,14 @@ python main.py --archive ../HumanActionParticipationModeling/data/ntu120_skeleto
 python main.py --batch-size 32 --num-workers 8 --epochs 100
 ```
 
+同一数据、batch、随机种子和训练轮数下分别运行两种宽度，比较 Top1/Top5、各类别准确率及吞吐。
+训练日志打印实际通道表和总参数量；当前未验证轻量版准确率或速度，不能把理论计算降低视为实测收益。
+
+```bash
+python main.py --backbone-width compact --batch-size 32 --num-workers 8 --seed 42
+python main.py --backbone-width standard --batch-size 32 --num-workers 8 --seed 42
+```
+
 先检查真实数据的双分支训练、验证和保存链路：
 
 ```bash
@@ -60,8 +71,9 @@ python main.py --archive ../HumanActionParticipationModeling/data/ntu120_skeleto
 ```
 
 `python -m isaa.train` 和 `python isaa/train.py` 也可启动同一训练程序。
-数据及输出的相对路径均以 ISAA 根目录为基准；默认输出为 `outputs/rtmw_ctr32_face6_input_v4/xsub120/last.pt`、`best.pt`。
-checkpoint 的 architecture 为 `rtmw_ctr32_face6_input_v4`；结构与旧版不兼容，需要重新训练，默认目录避免覆盖旧实验。
+数据及输出的相对路径均以 ISAA 根目录为基准；默认输出为 `outputs/rtmw_ctr32_face6_input_v4_compact/xsub120/last.pt`、`best.pt`。
+原宽度保存到 `outputs/rtmw_ctr32_face6_input_v4_standard/xsub120/`；显式指定 `--save-dir` 时需自行区分实验目录。
+checkpoint 的 architecture 为 `rtmw_ctr32_face6_input_v4`，`model_config` 记录宽度、实际通道表、辅助宽度和类别数。compact 与 standard 权重形状不同，需要分别训练。
 保留原双行进度条、时间戳、Top1/Top5/loss、吞吐和数据等待时间输出。
 CUDA 默认启用 TF32、固定尺寸卷积优化、常驻 worker、预取和非阻塞传输。
 入口每次从头训练；同一输出目录的 checkpoint 会被更新，目前没有断点续训参数。
@@ -75,7 +87,7 @@ from isaa.models.rtmw_local_ctr import RTMWLocalCTR
 model = RTMWLocalCTR(num_classes=120)
 model.set_fine_enabled(True)  # Enable the auxiliary branch (default).
 result = model(x, valid_frame_mask, return_node_features=True)
-# node_features: B x M x 256 x ceil(T/4) x 32
+# node_features: B x M x 192 x ceil(T/4) x 32 (standard: 256 channels)
 # node_indices: original RTMW indices of the 32 main joints
 # time_indices: 0, 4, 8, ... (input-frame anchors, not isolated-frame features)
 # auxiliary_node_features: B x M x 16 x T x 133 (expanded compatibility view)

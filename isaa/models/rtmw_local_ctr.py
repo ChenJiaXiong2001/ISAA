@@ -308,16 +308,24 @@ class CTRGCNBlock(nn.Module):
 class RTMWLocalCTR(nn.Module):
     """32-node CTR-GCN with early per-region fusion of all 133 joints."""
 
-    DEFAULT_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
+    STANDARD_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
+    COMPACT_CHANNELS = (48, 48, 48, 48, 96, 96, 96, 192, 192, 192)
+    CHANNEL_PRESETS = {"compact": COMPACT_CHANNELS, "standard": STANDARD_CHANNELS}
+    DEFAULT_CHANNELS = COMPACT_CHANNELS
     ARCHITECTURE = "rtmw_ctr32_face6_input_v4"
 
-    def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16) -> None:
+    def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16,
+                 backbone_width: str = "compact") -> None:
         super().__init__()
-        channels = tuple(self.DEFAULT_CHANNELS if channels is None else channels)
+        if backbone_width not in self.CHANNEL_PRESETS:
+            raise ValueError(f"Unknown backbone width: {backbone_width!r}")
+        self.backbone_width = backbone_width if channels is None else "custom"
+        channels = tuple(self.CHANNEL_PRESETS[backbone_width] if channels is None else channels)
         if num_classes < 1 or auxiliary_channels < 1:
             raise ValueError("Class and auxiliary channel counts must be positive")
         if not channels or any(c < 4 or c % 4 for c in channels):
             raise ValueError("channels must contain positive multiples of four")
+        self.channels = channels
         partition = build_region_partition("rtmw_133", 133)
         centers = torch.tensor(partition.center_joint_indices, dtype=torch.long)
         self.register_buffer("main_joint_indices", centers)
@@ -345,6 +353,13 @@ class RTMWLocalCTR(nn.Module):
         self.auxiliary_scale = nn.Parameter(torch.tensor(0.1))
         self.classifier = nn.Linear(channels[-1], num_classes)
         self._initialize_weights()
+
+    @property
+    def experiment_name(self) -> str:
+        width = self.backbone_width
+        if width == "custom":
+            width = "custom_" + "_".join(str(channel) for channel in self.channels)
+        return f"{self.ARCHITECTURE}_{width}"
 
     def _initialize_weights(self):
         for module in self.modules():
