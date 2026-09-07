@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--fine-start-epoch", type=int, default=0,
-                        help="Compatibility option; full-node CTR is enabled from epoch 1 by default")
+                        help="Use only 32 main joints through this epoch; 0 enables the fixed 133-node graph immediately")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=None,
                         help="Default: up to 8 on CUDA, 0 on CPU; 0 disables workers")
@@ -157,7 +157,7 @@ def main() -> None:
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
     model = RTMWLocalCTR(num_classes=args.num_classes).to(device)
-    print(f"ISAA RTMWLocalCTR ctr_gcn=full_133 channelwise_topology device={device} "
+    print(f"ISAA RTMWLocalCTR local_graph=fixed_133 coordination=ctr_32 device={device} "
           f"parameters={sum(p.numel() for p in model.parameters()):,}",
           flush=True)
     if device.type == "cuda":
@@ -207,7 +207,7 @@ def main() -> None:
     steps_per_epoch = train_steps + len(loaders["val"])
     total_run_steps = steps_per_epoch * args.epochs
     for epoch in range(1, args.epochs + 1):
-        model.set_fine_enabled(True)
+        model.set_fine_enabled(epoch > args.fine_start_epoch)
         completed_before = (epoch - 1) * steps_per_epoch
         progress_context = {
             "run_started_at": training_started_at,
@@ -215,7 +215,7 @@ def main() -> None:
             "completed_before": completed_before,
         }
         finish_progress_lines()
-        stage = "full_ctr"
+        stage = "fixed_133+ctr_32" if model.fine_enabled else "coarse_32"
         print(f"Training epoch: {epoch}/{args.epochs} stage={stage} "
               f"lr={optimizer.param_groups[0]['lr']:.8g}", flush=True)
         train_metrics = run_epoch(

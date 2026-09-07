@@ -30,6 +30,7 @@ class RTMWLocalCTRTests(unittest.TestCase):
         self.x[:, 2] = 1
 
     def test_fixed_local_and_only_32_node_dynamic_graphs(self):
+        self.assertTrue(self.model.fine_enabled)
         self.assertEqual(self.model.main_joint_indices.unique().numel(), 32)
         torch.testing.assert_close(self.model.joint_to_main[self.model.main_joint_indices], torch.arange(32))
         for block in self.model.blocks:
@@ -78,6 +79,7 @@ class RTMWLocalCTRTests(unittest.TestCase):
         self.assertEqual(out[:, :, :, 16].abs().sum().item(), 0)
 
     def test_stage_switch_uses_detail_only_after_warmup(self):
+        self.model.set_fine_enabled(False)
         self.model.eval()
         changed = self.x.clone()
         detail = torch.ones(133, dtype=torch.bool)
@@ -139,6 +141,7 @@ class RTMWLocalCTRTests(unittest.TestCase):
             torch.testing.assert_close(tensor, expected_buffers[name])
 
     def test_no_main_observations_during_coarse_stage(self):
+        self.model.set_fine_enabled(False)
         x = self.x.clone()
         x[:, 2, :, self.model.main_joint_indices] = 0
         torch.testing.assert_close(self.model(x), self.model.classifier.bias.expand(2, -1))
