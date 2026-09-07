@@ -10,7 +10,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from isaa.data.transforms import build_skeleton_feature_channels
 from isaa.models.rtmw_local_ctr import (
-    AuxiliarySkeleton, FixedSkeletonConv, MainNodeCTR, RegionalDetailPool, RTMWLocalCTR, _downsample_mask,
+    AuxiliarySkeleton, FaceTokenCompression, FixedSkeletonConv, MainNodeCTR, RegionalDetailPool,
+    RTMWLocalCTR, _downsample_mask,
 )
 from isaa.train import collate_rtmw, parse_args, run_epoch
 
@@ -38,7 +39,7 @@ class RTMWLocalCTRTests(unittest.TestCase):
         self.assertEqual(len(self.model.auxiliary.layers), 2)
         for layer in self.model.auxiliary.layers:
             self.assertIsInstance(layer, FixedSkeletonConv)
-            self.assertEqual(layer.adjacency.shape, (3, 133, 133))
+            self.assertEqual(layer.adjacency.shape, (3, 71, 71))
             self.assertNotIn("adjacency", dict(layer.named_parameters()))
             self.assertEqual(layer.out_channels, 16)
         for block in self.model.blocks:
@@ -74,7 +75,7 @@ class RTMWLocalCTRTests(unittest.TestCase):
         local = self.model.auxiliary.layers[0]
         with torch.no_grad():
             local.projection.weight.fill_(1)
-        x = torch.zeros(1, 3, 1, 133)
+        x = torch.zeros(1, 3, 1, 71)
         x[:, 0, :, 7] = 1
         out = local(x)
         self.assertGreater(out[:, :, :, 5].abs().sum().item(), 0)
@@ -172,8 +173,13 @@ class RTMWLocalCTRTests(unittest.TestCase):
                 self.assertEqual(out["auxiliary_node_features"].shape, (2, 2, 16, 5, 133))
                 self.assertEqual(out["auxiliary_node_mask"].shape, (2, 2, 1, 5, 133))
                 torch.testing.assert_close(out["auxiliary_node_indices"], torch.arange(133))
+                self.assertEqual(out["auxiliary_token_features"].shape, (2, 2, 16, 5, 71))
+                self.assertEqual(out["auxiliary_token_mask"].shape, (2, 2, 1, 5, 71))
+                expanded = out["auxiliary_token_features"].index_select(-1, out["auxiliary_original_to_token"])
+                torch.testing.assert_close(out["auxiliary_node_features"], expanded)
             else:
                 self.assertIsNone(out["auxiliary_node_features"])
+                self.assertIsNone(out["auxiliary_token_features"])
             restored = RTMWLocalCTR(num_classes=6, channels=(8, 8)).eval()
             restored.load_state_dict(self.model.state_dict())
             self.assertEqual(restored.fine_enabled, fine)
@@ -337,6 +343,82 @@ class RTMWLocalCTRTests(unittest.TestCase):
         regional = out["regional_features"].reshape(4, 32, 5, 32)
         expected = captured["before"] + self.model.auxiliary_scale * self.model.auxiliary_to_main(regional)
         torch.testing.assert_close(captured["after"], expected)
+
+    def test_face_compression_raw_means_masks_and_gradients(self):
+        compress = self.model.face_compression
+        x = self.x[..., 0].clone().requires_grad_()
+        mask = torch.ones(2, 1, 5, 133, dtype=torch.bool)
+        mask[0, :, 1, 23:91] = False
+        mask[1, :, :, 23] = False
+        compact, valid = compress(x, mask)
+        self.assertEqual(compact.shape, (2, 3, 5, 71))
+        torch.testing.assert_close(compact[..., :65], x.index_select(-1, compress.nonface_indices))
+        for index, group in enumerate(FaceTokenCompression.FACE_GROUPS):
+            weights = mask[..., list(group)]
+            expected = x[..., list(group)].masked_fill(~weights, 0).sum(-1) / weights.sum(-1).clamp_min(1)
+            torch.testing.assert_close(compact[..., 65 + index], expected)
+        self.assertFalse(valid[0, :, 1, 65:].any())
+        self.assertEqual(compact[0, :, 1, 65:].abs().sum().item(), 0)
+        compact.sum().backward()
+        self.assertTrue(torch.isfinite(x.grad).all())
+        self.assertTrue((x.grad[mask.expand_as(x)] > 0).all())
+        self.assertTrue((x.grad[~mask.expand_as(x)] == 0).all())
+
+    def test_compacted_graph_mapping_and_nonface_edges(self):
+        compress = self.model.face_compression
+        self.assertEqual(compress.original_to_token.unique().numel(), 71)
+        graph = compress.adjacency
+        torch.testing.assert_close(graph[0], torch.eye(71))
+        for part in (1, 2):
+            self.assertEqual(graph[part].diagonal().abs().sum().item(), 0)
+            degree = graph[part].sum(-1)
+            torch.testing.assert_close(degree[degree > 0], torch.ones_like(degree[degree > 0]))
+        expected = self.model.joint_graph.index_select(1, compress.nonface_indices).index_select(2, compress.nonface_indices)
+        torch.testing.assert_close(graph[:, :65, :65], expected)
+        torch.testing.assert_close(compress.token_owners[:65], self.model.joint_to_main[compress.nonface_indices])
+        self.assertTrue((compress.token_owners[65:] == self.model.joint_to_main[23]).all())
+        # Original chain contracts to five inter-token links in each direction.
+        self.assertEqual(torch.count_nonzero(graph[1, 65:, 65:]).item(), 5)
+        self.assertEqual(torch.count_nonzero(graph[2, 65:, 65:]).item(), 5)
+
+    def test_face_compression_precedes_every_auxiliary_projection(self):
+        self.model.eval()
+        seen = []
+        def capture(name):
+            def hook(module, args):
+                seen.append((name, args[0].shape[-1]))
+            return hook
+        hooks = [layer.projection.register_forward_pre_hook(capture("projection"))
+                 for layer in self.model.auxiliary.layers]
+        hooks += [norm.register_forward_pre_hook(capture("graph_norm"))
+                  for norm in self.model.auxiliary.norms]
+        hooks += [self.model.auxiliary.temporal.register_forward_pre_hook(capture("body_time")),
+                  self.model.auxiliary.face_temporal.register_forward_pre_hook(capture("face_time")),
+                  self.model.regional_pool.register_forward_pre_hook(capture("regions"))]
+        with torch.no_grad():
+            logits = self.model(self.x)
+            exported = self.model(self.x, return_node_features=True)
+        for hook in hooks:
+            hook.remove()
+        expected = [("projection", 71), ("graph_norm", 71), ("projection", 71),
+                    ("graph_norm", 71), ("body_time", 65), ("face_time", 6), ("regions", 71)]
+        self.assertEqual(seen, expected * 2)
+        torch.testing.assert_close(logits, exported["logits"])
+
+    def test_missing_face_does_not_update_face_statistics(self):
+        model = copy.deepcopy(self.model).train()
+        x = self.x.clone()
+        x[:, 2, :, 23:91] = 0
+        before = {name: value.clone() for name, value in model.auxiliary.face_norm.named_buffers()}
+        out = model(x, return_node_features=True)
+        self.assertFalse(out["auxiliary_token_mask"][..., 65:].any())
+        self.assertEqual(out["auxiliary_token_features"][..., 65:].abs().sum().item(), 0)
+        for name, value in model.auxiliary.face_norm.named_buffers():
+            torch.testing.assert_close(value, before[name])
+        out["logits"].square().sum().backward()
+        for parameter in model.parameters():
+            if parameter.grad is not None:
+                self.assertTrue(torch.isfinite(parameter.grad).all())
 
     def test_entry_auxiliary_options_and_legacy_alias(self):
         for flag in ("--aux-start-epoch", "--fine-start-epoch"):

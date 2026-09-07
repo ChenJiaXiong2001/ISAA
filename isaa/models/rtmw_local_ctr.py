@@ -86,11 +86,58 @@ class FixedSkeletonConv(nn.Module):
         return out.index_add_(3, self.edge_targets, messages)
 
 
+class FaceTokenCompression(nn.Module):
+    """Masked raw-input means: 65 unchanged joints followed by six face tokens."""
+
+    FACE_GROUPS = (tuple(range(23, 34)), tuple(range(34, 45)), tuple(range(45, 56)),
+                   tuple(range(56, 67)), tuple(range(67, 79)), tuple(range(79, 91)))
+
+    def __init__(self, adjacency, owners):
+        super().__init__()
+        nonface = torch.tensor(list(range(23)) + list(range(91, 133)), dtype=torch.long)
+        mapping = torch.empty(133, dtype=torch.long)
+        mapping[nonface] = torch.arange(65)
+        members = torch.zeros(6, 12, dtype=torch.long)
+        valid = torch.zeros(6, 12, dtype=torch.bool)
+        for index, group in enumerate(self.FACE_GROUPS):
+            members[index, :len(group)] = torch.tensor(group)
+            valid[index, :len(group)] = True
+            mapping[list(group)] = 65 + index
+        self.register_buffer("nonface_indices", nonface)
+        self.register_buffer("face_indices", members)
+        self.register_buffer("face_members", valid)
+        self.register_buffer("original_to_token", mapping)
+        self.register_buffer("token_owners", torch.cat((owners[nonface], owners[members[:, 0]])))
+        # Contract original edges, deduplicate them, and normalize again. Edges
+        # internal to a token become its single self-loop, not directional loops.
+        compressed = adjacency.new_zeros(3, 71, 71)
+        compressed[0] = torch.eye(71, dtype=adjacency.dtype)
+        for part in (1, 2):
+            targets, sources = (adjacency[part] != 0).nonzero(as_tuple=True)
+            targets, sources = mapping[targets], mapping[sources]
+            keep = targets != sources
+            compressed[part, targets[keep], sources[keep]] = 1
+        self.register_buffer("adjacency", normalize_adjacency_partitions(compressed))
+
+    def forward(self, x, mask):
+        b, c, t, _ = x.shape
+        indices = self.face_indices.flatten()
+        face = x.index_select(-1, indices).reshape(b, c, t, 6, 12)
+        valid = mask.index_select(-1, indices).reshape(b, 1, t, 6, 12)
+        valid = valid & self.face_members[None, None, None]
+        count = valid.sum(-1)
+        face = face.masked_fill(~valid, 0).sum(-1) / count.clamp_min(1)
+        nonface_mask = mask.index_select(-1, self.nonface_indices)
+        nonface = x.index_select(-1, self.nonface_indices).masked_fill(~nonface_mask, 0)
+        return torch.cat((nonface, face), dim=-1), torch.cat((nonface_mask, count > 0), dim=-1)
+
+
 class AuxiliarySkeleton(nn.Module):
     """Low-width fixed graph layers plus depthwise temporal detail modeling."""
 
-    def __init__(self, adjacency: torch.Tensor, channels: int) -> None:
+    def __init__(self, adjacency: torch.Tensor, channels: int, *, nonface_count: int | None = None) -> None:
         super().__init__()
+        self.nonface_count = nonface_count
         self.layers = nn.ModuleList([
             FixedSkeletonConv(3, channels, adjacency),
             FixedSkeletonConv(channels, channels, adjacency),
@@ -100,45 +147,25 @@ class AuxiliarySkeleton(nn.Module):
                                   groups=channels, bias=False)
         self.temporal_mix = nn.Conv2d(channels, channels, 1, bias=False)
         self.temporal_norm = PointBatchNorm(channels)
-        face_groups = (tuple(range(23, 34)), tuple(range(34, 45)), tuple(range(45, 56)),
-                       tuple(range(56, 67)), tuple(range(67, 79)), tuple(range(79, 91)))
-        padded_groups = [group + (group[-1],) * (12 - len(group)) for group in face_groups]
-        face_valid = torch.zeros(6, 12, dtype=torch.bool)
-        for index, group in enumerate(face_groups):
-            face_valid[index, :len(group)] = True
-        self.register_buffer("face_indices", torch.tensor(padded_groups), persistent=False)
-        self.register_buffer("face_valid", face_valid, persistent=False)
-        self.face_temporal = nn.Conv2d(channels, channels, (3, 1), padding=(1, 0),
-                                       groups=channels, bias=False)
-        self.face_mix = nn.Conv2d(channels, channels, 1, bias=False)
+        if nonface_count is not None:
+            self.face_temporal = nn.Conv2d(channels, channels, (3, 1), padding=(1, 0),
+                                           groups=channels, bias=False)
+            self.face_mix = nn.Conv2d(channels, channels, 1, bias=False)
+            self.face_norm = PointBatchNorm(channels)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         for layer, norm in zip(self.layers, self.norms):
             x = F.relu(norm(layer(x), mask)).masked_fill(~mask, 0)
-        # Non-face joints keep their own temporal features. Face joints are
-        # reduced to six semantic tokens before temporal modeling, then
-        # broadcast back so downstream exports retain the original 133 layout.
-        nonface = torch.cat((x[..., :23], x[..., 91:]), dim=-1)
-        nonmask = torch.cat((mask[..., :23], mask[..., 91:]), dim=-1)
-        face = x.index_select(-1, self.face_indices.flatten()).reshape(x.size(0), x.size(1), x.size(2), 6, 12)
-        facemask = mask.index_select(-1, self.face_indices.flatten()).reshape(mask.size(0), 1, mask.size(2), 6, 12)
-        facemask = facemask & self.face_valid[None, None, None]
-        face = face.masked_fill(~facemask, 0)
-        face_count = facemask.sum(-1).clamp_min(1)
-        face = face.sum(-1) / face_count
-        face_mask = face_count > 0
+        if self.nonface_count is None:
+            temporal = self.temporal_mix(self.temporal(x).masked_fill(~mask, 0))
+            return F.relu(x + self.temporal_norm(temporal, mask)).masked_fill(~mask, 0)
+        nonface, face = x[..., :self.nonface_count], x[..., self.nonface_count:]
+        nonmask, face_mask = mask[..., :self.nonface_count], mask[..., self.nonface_count:]
         nonface = self.temporal_mix(self.temporal(nonface).masked_fill(~nonmask, 0))
         nonface = self.temporal_norm(nonface, nonmask)
         face = self.face_mix(self.face_temporal(face).masked_fill(~face_mask, 0))
-        face = self.temporal_norm(face, face_mask)
-        output = x.new_zeros(x.shape)
-        output[..., :23] = nonface[..., :23]
-        output[..., 91:] = nonface[..., 23:]
-        output_face = face.unsqueeze(-1).expand(-1, -1, -1, -1, 12).reshape_as(
-            x.index_select(-1, self.face_indices.flatten())
-        )
-        output.index_copy_(-1, self.face_indices.flatten(), output_face)
-        return F.relu(x + output).masked_fill(~mask, 0)
+        face = self.face_norm(face, face_mask)
+        return F.relu(x + torch.cat((nonface, face), dim=-1)).masked_fill(~mask, 0)
 
 
 class RegionalDetailPool(nn.Module):
@@ -282,7 +309,7 @@ class RTMWLocalCTR(nn.Module):
     """32-node CTR-GCN with early per-region fusion of all 133 joints."""
 
     DEFAULT_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
-    ARCHITECTURE = "rtmw_ctr32_region133_v3"
+    ARCHITECTURE = "rtmw_ctr32_face6_input_v4"
 
     def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16) -> None:
         super().__init__()
@@ -311,8 +338,9 @@ class RTMWLocalCTR(nn.Module):
             self.blocks.append(CTRGCNBlock(in_channels, out_channels, main_graph,
                                           stride=2 if index in (4, 7) else 1, residual=index != 0))
             in_channels = out_channels
-        self.auxiliary = AuxiliarySkeleton(graph, auxiliary_channels)
-        self.regional_pool = RegionalDetailPool(auxiliary_channels, self.joint_to_main, centers.numel())
+        self.face_compression = FaceTokenCompression(graph, self.joint_to_main)
+        self.auxiliary = AuxiliarySkeleton(self.face_compression.adjacency, auxiliary_channels, nonface_count=65)
+        self.regional_pool = RegionalDetailPool(auxiliary_channels, self.face_compression.token_owners, centers.numel())
         self.auxiliary_to_main = nn.Conv2d(2 * auxiliary_channels, channels[0], 1, bias=False)
         self.auxiliary_scale = nn.Parameter(torch.tensor(0.1))
         self.classifier = nn.Linear(channels[-1], num_classes)
@@ -367,8 +395,11 @@ class RTMWLocalCTR(nn.Module):
         x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, n)
         mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, n)
         x = x.masked_fill(~mask, 0)
-        auxiliary = self.auxiliary(x, mask) if self.fine_enabled else None
-        regional, region_mask = self.regional_pool(auxiliary, mask) if auxiliary is not None else (None, None)
+        auxiliary = auxiliary_mask = regional = region_mask = None
+        if self.fine_enabled:
+            auxiliary_input, auxiliary_mask = self.face_compression(x, mask)
+            auxiliary = self.auxiliary(auxiliary_input, auxiliary_mask)
+            regional, region_mask = self.regional_pool(auxiliary, auxiliary_mask)
         main = x.index_select(-1, self.main_joint_indices)
         main_mask = mask.index_select(-1, self.main_joint_indices)
         norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
@@ -387,16 +418,22 @@ class RTMWLocalCTR(nn.Module):
         pooled = self._pool(main, main_mask, b, m)
         logits = self.classifier(pooled)
         if return_node_features:
+            # Expand only for the legacy analysis view, never for classification.
+            expanded = (auxiliary.index_select(-1, self.face_compression.original_to_token).masked_fill(~mask, 0)
+                        if auxiliary is not None else None)
             return {
                 "logits": logits,
                 "node_features": main.reshape(b, m, *main.shape[1:]),
                 "node_mask": main_mask.reshape(b, m, *main_mask.shape[1:]),
                 "node_indices": self.main_joint_indices,
                 "time_indices": torch.arange(main.size(2), device=x.device) * temporal_stride,
-                "auxiliary_node_features": (auxiliary.reshape(b, m, *auxiliary.shape[1:])
-                                            if auxiliary is not None else None),
+                "auxiliary_node_features": expanded.reshape(b, m, *expanded.shape[1:]) if expanded is not None else None,
                 "auxiliary_node_mask": mask.reshape(b, m, 1, t, n) if auxiliary is not None else None,
                 "auxiliary_node_indices": torch.arange(n, device=x.device) if auxiliary is not None else None,
+                "auxiliary_token_features": auxiliary.reshape(b, m, *auxiliary.shape[1:]) if auxiliary is not None else None,
+                "auxiliary_token_mask": (auxiliary_mask.reshape(b, m, *auxiliary_mask.shape[1:])
+                                         if auxiliary is not None else None),
+                "auxiliary_original_to_token": self.face_compression.original_to_token if auxiliary is not None else None,
                 "regional_features": regional.reshape(b, m, *regional.shape[1:]) if regional is not None else None,
                 "regional_mask": region_mask.reshape(b, m, *region_mask.shape[1:]) if region_mask is not None else None,
             }
