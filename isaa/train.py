@@ -19,6 +19,7 @@ from torch import nn
 from torch.utils.data import DataLoader, default_collate
 
 from isaa.data.rtmw_zip_dataset import RTMWZipDataset
+from isaa.data.rtmw_npy_dataset import RTMWNpyDataset
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
 from isaa.utils.console_logging import (
     estimate_eta,
@@ -37,8 +38,12 @@ from isaa.layouts import register_skeleton_presets
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", default="data/ntu120_skeletons_rtmw.zip")
-    parser.add_argument("--split", choices=("xsub120", "xset120"), default="xsub120")
-    parser.add_argument("--num-classes", type=int, default=120)
+    parser.add_argument("--split", choices=("xsub60", "xset60", "xsub120", "xset120"), default="xsub120")
+    parser.add_argument("--num-classes", type=int, default=None)
+    parser.add_argument("--npy-dir", default=None,
+                        help="Preprocessed root containing train/ and val/ data.npy + labels.npy")
+    parser.add_argument("--input-bn1d", action="store_true",
+                        help="Use one ordinary nn.BatchNorm1d across 3x32 input channels")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--test-batch-size", type=int, default=64)
@@ -81,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true", help="Synthetic forward check; no ZIP needed")
     args = parser.parse_args()
+    if args.num_classes is None:
+        args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if min(args.num_classes, args.window_size, args.batch_size, args.test_batch_size, args.epochs, args.auxiliary_channels) < 1:
         parser.error("num-classes, window-size, batch-size, epochs and auxiliary-channels must be positive")
     if args.fine_start_epoch < 0:
@@ -211,6 +218,8 @@ def run_epoch(
 def main() -> None:
     args = parse_args()
     variant = "rtmw_ctr32_only_v5" if args.main_only else RTMWLocalCTR.ARCHITECTURE
+    if args.input_bn1d:
+        variant += "_inputbn1d"
     base = (Path(args.save_dir) if args.save_dir else
             PROJECT_ROOT / "outputs" / f"{variant}_{args.backbone_width}_sgd" / args.split)
     if not base.is_absolute():
@@ -256,11 +265,13 @@ def _run(args, save_dir, records) -> None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
     model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels,
                          backbone_width=args.backbone_width, main_only=args.main_only,
-                         native_bn=args.native_bn).to(device)
+                         native_bn=args.native_bn,
+                         input_norm="bn1d" if args.input_bn1d else "point_bn2d").to(device)
     model.set_fine_enabled(not args.main_only and args.fine_start_epoch == 0)
     model_config = {"backbone_width": model.backbone_width, "channels": model.channels,
                     "auxiliary_channels": args.auxiliary_channels, "num_classes": args.num_classes,
-                    "main_only": args.main_only, "native_bn": model.native_bn}
+                    "main_only": args.main_only, "native_bn": model.native_bn,
+                    "input_norm": model.input_norm_type}
     records.update_config(args=vars(args), model_config=model_config, architecture=model.ARCHITECTURE,
                           optimizer={"name": "SGD", "base_lr": args.lr, "momentum": args.momentum,
                                      "nesterov": args.nesterov, "weight_decay": args.weight_decay},
@@ -271,11 +282,13 @@ def _run(args, save_dir, records) -> None:
                                    "cudnn": cudnn_version,
                                    "cudnn_enabled": torch.backends.cudnn.enabled},
                           preprocessing={"channels": ["relative_x", "relative_y", "score"],
-                                         "crop": "random fixed window / center validation, pad short clips",
-                                         "augmentation": {"random_temporal_crop": True}})
+                                         "crop": ("precomputed fixed window" if args.npy_dir else
+                                                  "random fixed window / center validation, pad short clips"),
+                                         "augmentation": {"random_temporal_crop": not bool(args.npy_dir)}})
     print(f"ISAA {model.experiment_name} backbone=ctr_gcn_32 auxiliary={'off' if args.main_only else 'fixed_71'} "
           f"channels={model.channels} "
-          f"auxiliary_channels={args.auxiliary_channels} bn={'native' if model.native_bn else 'masked'} device={device} "
+          f"auxiliary_channels={args.auxiliary_channels} bn={'native' if model.native_bn else 'masked'} "
+          f"input_norm={model.input_norm_type} device={device} "
           f"parameters={sum(p.numel() for p in model.parameters()):,}",
           flush=True)
     print(f"optimizer: SGD lr={args.lr} momentum={args.momentum} nesterov={args.nesterov} "
@@ -317,14 +330,22 @@ def _run(args, save_dir, records) -> None:
         archive = PROJECT_ROOT / archive
     loaders = {}
     dataset_info = {}
-    collate = partial(collate_rtmw, main_indices=model.main_joint_indices.cpu() if args.main_only else None)
+    collate = (default_collate if args.npy_dir else
+               partial(collate_rtmw, main_indices=model.main_joint_indices.cpu() if args.main_only else None))
     for split in ("train", "val"):
-        dataset = RTMWZipDataset(
-            archive, split=split, split_protocol=args.split,
-            window_size=args.window_size, num_joints=133, num_classes=args.num_classes,
-            layout="rtmw_133", max_persons=2, max_samples=args.max_samples,
-            augment=split == "train", augmentation_config={"random_temporal_crop": True},
-        )
+        if args.npy_dir:
+            dataset = RTMWNpyDataset(Path(args.npy_dir) / split, max_samples=args.max_samples)
+            if dataset.data.shape[2] != args.window_size:
+                raise ValueError(
+                    f"预处理窗口 T={dataset.data.shape[2]} 与 --window-size={args.window_size} 不一致"
+                )
+        else:
+            dataset = RTMWZipDataset(
+                archive, split=split, split_protocol=args.split,
+                window_size=args.window_size, num_joints=133, num_classes=args.num_classes,
+                layout="rtmw_133", max_persons=2, max_samples=args.max_samples,
+                augment=split == "train", augmentation_config={"random_temporal_crop": True},
+            )
         loaders[split] = DataLoader(
             dataset, batch_size=args.batch_size if split == "train" else args.test_batch_size,
             shuffle=split == "train", drop_last=args.drop_last and split == "train",
@@ -338,8 +359,11 @@ def _run(args, save_dir, records) -> None:
             raise ValueError("Empty loader: lower --batch-size or use --no-drop-last for a small smoke test")
         print(f"{split}: {len(dataset)} samples ({args.split})", flush=True)
 
-    records.update_config(dataset=dataset_info, archive=str(archive.resolve()),
-                          archive_bytes=archive.stat().st_size, archive_mtime_ns=archive.stat().st_mtime_ns)
+    if args.npy_dir:
+        records.update_config(dataset=dataset_info, dataset_format="npy_memmap", npy_dir=str(Path(args.npy_dir).resolve()))
+    else:
+        records.update_config(dataset=dataset_info, archive=str(archive.resolve()),
+                              archive_bytes=archive.stat().st_size, archive_mtime_ns=archive.stat().st_mtime_ns)
     optimizer = torch.optim.SGD(train_model.parameters(), lr=args.lr, momentum=args.momentum,
                                 nesterov=args.nesterov, weight_decay=args.weight_decay)
     best_accuracy = -1.0

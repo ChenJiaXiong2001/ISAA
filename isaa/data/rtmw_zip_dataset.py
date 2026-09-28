@@ -29,6 +29,31 @@ from isaa.data.skeleton_dataset import (
 )
 
 
+NTU60_XSUB_TRAIN_SUBJECTS = frozenset(
+    {
+        1,
+        2,
+        4,
+        5,
+        8,
+        9,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        25,
+        27,
+        28,
+        31,
+        34,
+        35,
+        38,
+    }
+)
+
 NTU120_XSUB_TRAIN_SUBJECTS = frozenset(
     {
         1,
@@ -85,7 +110,7 @@ NTU120_XSUB_TRAIN_SUBJECTS = frozenset(
         103,
     }
 )
-SUPPORTED_RTMW_SPLIT_PROTOCOLS = frozenset({"xsub120", "xset120"})
+SUPPORTED_RTMW_SPLIT_PROTOCOLS = frozenset({"xsub60", "xset60", "xsub120", "xset120"})
 SUPPORTED_RTMW_SCORE_NORMALIZATIONS = frozenset({"auto", "clip", "sigmoid"})
 
 _SAMPLE_NAME_PATTERN = re.compile(
@@ -109,7 +134,7 @@ def _canonical_split_protocol(value: object) -> str:
     protocol = aliases.get(protocol, protocol)
     if protocol not in SUPPORTED_RTMW_SPLIT_PROTOCOLS:
         raise ValueError(
-            "RTMW ZIP split_protocol 只支持 xsub120/xset120 "
+            "RTMW ZIP split_protocol 只支持 xsub60/xset60/xsub120/xset120 "
             f"（也可简写 xsub/xset），当前为 {value!r}"
         )
     return protocol
@@ -169,6 +194,8 @@ def scan_rtmw_archive(archive_path: str | Path) -> tuple[RTMWSampleInfo, ...]:
 
 
 def _belongs_to_train_split(sample: RTMWSampleInfo, protocol: str) -> bool:
+    if protocol == "xsub60":
+        return sample.subject in NTU60_XSUB_TRAIN_SUBJECTS
     if protocol == "xsub120":
         return sample.subject in NTU120_XSUB_TRAIN_SUBJECTS
     return sample.setup % 2 == 0

@@ -132,6 +132,38 @@ result = model(x, valid_frame_mask, return_node_features=True)
 
 ## 验证
 
+### NTU60 RTMW 离线预处理与普通 BatchNorm1d 对照
+
+服务器上的 NTU60 RTMW ZIP 可以先转换成固定窗口的 NumPy 文件。预处理后的每个 split 目录包含
+`data.npy`（`N x 3 x 64 x 32 x 2`）、`labels.npy`、`frame_mask.npy` 和 `metadata.json`。
+其中 3 个输入通道为相对 x、相对 y、score，节点已经固定为 32 个主节点。
+
+```bash
+cd ~/Desktop/ISAA
+source ~/venvs/isaa-cu126/bin/activate
+env -u LD_LIBRARY_PATH python tools/preprocess_rtmw.py \
+  --archive /home/xiong/Desktop/ISAA/data/ntu60_skeletons_rtmw.zip \
+  --output /home/xiong/Desktop/ISAA/data/ntu60_rtmw_npy/xsub60 \
+  --split xsub60 --num-classes 60 --window-size 64 \
+  --batch-size 64 --num-workers 8
+```
+
+生成完成后启动 65 轮 NTU60 XSub 对照训练：
+
+```bash
+env -u LD_LIBRARY_PATH python main.py \
+  --archive /home/xiong/Desktop/ISAA/data/ntu60_skeletons_rtmw.zip \
+  --npy-dir /home/xiong/Desktop/ISAA/data/ntu60_rtmw_npy/xsub60 \
+  --split xsub60 --num-classes 60 --window-size 64 \
+  --batch-size 64 --test-batch-size 64 --num-workers 8 \
+  --input-bn1d --native-bn --epochs 65
+```
+
+训练输出目录会带有 `inputbn1d` 标记，并保存 `console.log`、`epochs.csv`、`batches.jsonl`、
+`last.pt` 和 `best.pt`。对比时读取官方 CTR-GCN 的
+`~/Desktop/CTR-GCN/work_dir/ntu60/xsub/ctrgcn_joint/console.log`，比较相同 epoch 的 Top1、Top5、
+loss，以及两边的 samples/s 和每轮耗时。
+
 ```bash
 python -m unittest tests.test_experiment -v
 python -m unittest discover -s tests -v

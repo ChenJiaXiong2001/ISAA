@@ -10,7 +10,7 @@ from torch.nn import functional as F
 
 from isaa.graph.adjacency import build_joint_spatial_partitions, normalize_adjacency_partitions
 from isaa.graph.regions import build_region_partition
-from isaa.models.normalization import _masked_stats_chunk_size
+from isaa.models.normalization import PlainSkeletonBatchNorm1d, _masked_stats_chunk_size
 
 
 class PointBatchNorm(nn.Module):
@@ -355,7 +355,7 @@ class RTMWLocalCTR(nn.Module):
 
     def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16,
                  backbone_width: str = "compact", main_only: bool = False,
-                 native_bn: bool | None = None) -> None:
+                 native_bn: bool | None = None, input_norm: str = "point_bn2d") -> None:
         super().__init__()
         if backbone_width not in self.CHANNEL_PRESETS:
             raise ValueError(f"Unknown backbone width: {backbone_width!r}")
@@ -368,6 +368,9 @@ class RTMWLocalCTR(nn.Module):
         self.channels = channels
         self.main_only = bool(main_only)
         self.native_bn = self.main_only if native_bn is None else bool(native_bn)
+        self.input_norm_type = str(input_norm).strip().lower()
+        if self.input_norm_type not in {"point_bn2d", "bn1d"}:
+            raise ValueError("input_norm 只支持 point_bn2d 或 bn1d")
         if self.main_only:
             self.ARCHITECTURE = "rtmw_ctr32_only_v5"
         partition = build_region_partition("rtmw_133", 133)
@@ -383,7 +386,10 @@ class RTMWLocalCTR(nn.Module):
         self.register_buffer("main_graph", main_graph)
         # Per-joint statistics are shared across people, allowing masked empty
         # tracks without requiring a fixed number of people.
-        self.input_norm = PointBatchNorm(3 * centers.numel(), native=self.native_bn)
+        if self.input_norm_type == "bn1d":
+            self.input_norm = PlainSkeletonBatchNorm1d(3, centers.numel())
+        else:
+            self.input_norm = PointBatchNorm(3 * centers.numel(), native=self.native_bn)
         self.blocks = nn.ModuleList()
         in_channels = 3
         for index, out_channels in enumerate(channels):
@@ -468,9 +474,12 @@ class RTMWLocalCTR(nn.Module):
         # selects it in workers after RTMW torso normalization, before transfer.
         main = x if n == 32 else x.index_select(-1, self.main_joint_indices)
         main_mask = mask if n == 32 else mask.index_select(-1, self.main_joint_indices)
-        norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
-        main = main.permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
-        main = self.input_norm(main, norm_mask).reshape(b * m, c, 32, t).permute(0, 1, 3, 2)
+        if self.input_norm_type == "bn1d":
+            main = self.input_norm(main, main_mask)
+        else:
+            norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
+            main = main.permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
+            main = self.input_norm(main, norm_mask).reshape(b * m, c, 32, t).permute(0, 1, 3, 2)
         temporal_stride = 1
         for index, block in enumerate(self.blocks):
             main, main_mask = block(main, main_mask)

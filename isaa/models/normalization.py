@@ -196,3 +196,33 @@ class SkeletonInputNorm(nn.Module):
                 x.mul_(self.bn.weight.view(1, -1, 1))
                 x.add_(self.bn.bias.view(1, -1, 1))
         return x.view(b, n, c, t).permute(0, 2, 3, 1).contiguous()
+
+
+class PlainSkeletonBatchNorm1d(nn.Module):
+    """普通 BatchNorm1d 输入基线。
+
+    关节和输入通道合并成 ``C*N``，只在时间维上调用一次原生
+    ``nn.BatchNorm1d``。当输入已经离线固定为完整窗口时，调用路径不做
+    masked 统计，便于与官方 CTR-GCN 的普通 BN 基线比较。
+    """
+
+    def __init__(self, channels: int, num_joints: int) -> None:
+        super().__init__()
+        self.channels = int(channels)
+        self.num_joints = int(num_joints)
+        self.bn = nn.BatchNorm1d(self.channels * self.num_joints)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"PlainSkeletonBatchNorm1d 需要 B x C x T x N，当前为 {tuple(x.shape)}")
+        b, c, t, n = x.shape
+        if c != self.channels or n != self.num_joints:
+            raise ValueError(
+                f"PlainSkeletonBatchNorm1d 输入需要 C={self.channels}, N={self.num_joints}，"
+                f"当前为 C={c}, N={n}"
+            )
+        # Deliberately ignore validity masks: this is the ordinary BN1d
+        # baseline, so padded/zero observations participate in its statistics.
+        flat = x.permute(0, 3, 1, 2).contiguous().view(b, n * c, t)
+        flat = self.bn(flat)
+        return flat.view(b, n, c, t).permute(0, 2, 3, 1).contiguous()
