@@ -315,7 +315,7 @@ class RTMWLocalCTR(nn.Module):
     ARCHITECTURE = "rtmw_ctr32_face6_input_v4"
 
     def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16,
-                 backbone_width: str = "compact") -> None:
+                 backbone_width: str = "compact", main_only: bool = False) -> None:
         super().__init__()
         if backbone_width not in self.CHANNEL_PRESETS:
             raise ValueError(f"Unknown backbone width: {backbone_width!r}")
@@ -326,12 +326,15 @@ class RTMWLocalCTR(nn.Module):
         if not channels or any(c < 4 or c % 4 for c in channels):
             raise ValueError("channels must contain positive multiples of four")
         self.channels = channels
+        self.main_only = bool(main_only)
+        if self.main_only:
+            self.ARCHITECTURE = "rtmw_ctr32_only_v5"
         partition = build_region_partition("rtmw_133", 133)
         centers = torch.tensor(partition.center_joint_indices, dtype=torch.long)
         self.register_buffer("main_joint_indices", centers)
         self.register_buffer("joint_to_main", torch.tensor(partition.joint_to_region, dtype=torch.long))
-        self.register_buffer("fine_stage", torch.tensor(True))
-        self._fine_enabled = True
+        self.register_buffer("fine_stage", torch.tensor(not self.main_only))
+        self._fine_enabled = not self.main_only
         self.register_load_state_dict_post_hook(self._restore_stage)
         graph = build_joint_spatial_partitions(133, partition, "rtmw_133", scope="full")
         main_graph = normalize_adjacency_partitions(graph.index_select(1, centers).index_select(2, centers))
@@ -346,11 +349,12 @@ class RTMWLocalCTR(nn.Module):
             self.blocks.append(CTRGCNBlock(in_channels, out_channels, main_graph,
                                           stride=2 if index in (4, 7) else 1, residual=index != 0))
             in_channels = out_channels
-        self.face_compression = FaceTokenCompression(graph, self.joint_to_main)
-        self.auxiliary = AuxiliarySkeleton(self.face_compression.adjacency, auxiliary_channels, nonface_count=65)
-        self.regional_pool = RegionalDetailPool(auxiliary_channels, self.face_compression.token_owners, centers.numel())
-        self.auxiliary_to_main = nn.Conv2d(2 * auxiliary_channels, channels[0], 1, bias=False)
-        self.auxiliary_scale = nn.Parameter(torch.tensor(0.1))
+        if not self.main_only:
+            self.face_compression = FaceTokenCompression(graph, self.joint_to_main)
+            self.auxiliary = AuxiliarySkeleton(self.face_compression.adjacency, auxiliary_channels, nonface_count=65)
+            self.regional_pool = RegionalDetailPool(auxiliary_channels, self.face_compression.token_owners, centers.numel())
+            self.auxiliary_to_main = nn.Conv2d(2 * auxiliary_channels, channels[0], 1, bias=False)
+            self.auxiliary_scale = nn.Parameter(torch.tensor(0.1))
         self.classifier = nn.Linear(channels[-1], num_classes)
         self._initialize_weights()
 
@@ -381,9 +385,11 @@ class RTMWLocalCTR(nn.Module):
         return self._fine_enabled
 
     def _restore_stage(self, module, incompatible_keys) -> None:
-        self._fine_enabled = bool(self.fine_stage.item())
+        self.set_fine_enabled(bool(self.fine_stage.item()))
 
     def set_fine_enabled(self, enabled: bool) -> None:
+        if enabled and self.main_only:
+            raise ValueError("main_only models cannot enable an auxiliary branch")
         self._fine_enabled = bool(enabled)
         self.fine_stage.fill_(self._fine_enabled)
 
@@ -397,8 +403,9 @@ class RTMWLocalCTR(nn.Module):
     def forward(self, x, valid_frame_mask=None, *, return_node_features=False):
         if x.ndim == 4:
             x = x.unsqueeze(-1)
-        if x.ndim != 5 or x.size(1) != 3 or x.size(3) != 133:
-            raise ValueError("Expected B x 3 x T x 133 [relative x, relative y, score], optionally x M")
+        allowed_nodes = (32, 133) if self.main_only else (133,)
+        if x.ndim != 5 or x.size(1) != 3 or x.size(3) not in allowed_nodes:
+            raise ValueError(f"Expected B x 3 x T x N x M; N must be in {allowed_nodes}")
         b, c, t, n, m = x.shape
         if min(b, t, m) <= 0:
             raise ValueError("Batch, frame and person dimensions must be nonempty")
@@ -415,8 +422,10 @@ class RTMWLocalCTR(nn.Module):
             auxiliary_input, auxiliary_mask = self.face_compression(x, mask)
             auxiliary = self.auxiliary(auxiliary_input, auxiliary_mask)
             regional, region_mask = self.regional_pool(auxiliary, auxiliary_mask)
-        main = x.index_select(-1, self.main_joint_indices)
-        main_mask = mask.index_select(-1, self.main_joint_indices)
+        # A 32-node input is already ordered by main_joint_indices. The trainer
+        # selects it in workers after RTMW torso normalization, before transfer.
+        main = x if n == 32 else x.index_select(-1, self.main_joint_indices)
+        main_mask = mask if n == 32 else mask.index_select(-1, self.main_joint_indices)
         norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
         main = main.permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
         main = self.input_norm(main, norm_mask).reshape(b * m, c, 32, t).permute(0, 1, 3, 2)

@@ -1,7 +1,10 @@
 """Behavioral checks for local skeleton structure and main-node coordination."""
 
 import copy
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -14,6 +17,7 @@ from isaa.models.rtmw_local_ctr import (
     RTMWLocalCTR, _downsample_mask,
 )
 from isaa.train import collate_rtmw, parse_args, run_epoch
+from isaa.utils.experiment import RunRecords
 
 
 class RTMWLocalCTRTests(unittest.TestCase):
@@ -247,11 +251,69 @@ class RTMWLocalCTRTests(unittest.TestCase):
 
     def test_entry_width_selection(self):
         with patch("sys.argv", ["main.py"]):
-            self.assertEqual(parse_args().backbone_width, "compact")
+            args = parse_args()
+            self.assertEqual(args.backbone_width, "standard")
+            self.assertTrue(args.main_only)
+            self.assertEqual((args.batch_size, args.test_batch_size, args.epochs), (64, 64, 65))
+            self.assertEqual((args.lr, args.weight_decay, args.momentum), (0.1, 0.0004, 0.9))
+            self.assertEqual((args.warmup_epochs, args.lr_steps), (5, [35, 55]))
+            self.assertTrue(args.nesterov)
         with patch("sys.argv", ["main.py", "--backbone-width", "standard"]):
             self.assertEqual(parse_args().backbone_width, "standard")
         with self.assertRaises(ValueError):
             RTMWLocalCTR(backbone_width="unknown")
+
+    def test_main_only_has_no_auxiliary_and_accepts_selected_nodes(self):
+        model = RTMWLocalCTR(num_classes=6, channels=(8, 8), main_only=True).eval()
+        self.assertFalse(model.fine_enabled)
+        for name in ("auxiliary", "face_compression", "regional_pool", "auxiliary_to_main", "auxiliary_scale"):
+            self.assertFalse(hasattr(model, name))
+        selected = self.x.index_select(3, model.main_joint_indices)
+        torch.testing.assert_close(model(selected), model(self.x))
+        changed = self.x.clone()
+        detail = torch.ones(133, dtype=torch.bool)
+        detail[model.main_joint_indices] = False
+        changed[:, :, :, detail] = float("nan")
+        torch.testing.assert_close(model(changed), model(selected))
+        self.assertIsNone(model(selected, return_node_features=True)["auxiliary_node_features"])
+        with self.assertRaises(ValueError):
+            model.set_fine_enabled(True)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.02, momentum=0.9, nesterov=True)
+        model.train()
+        loss = nn.functional.cross_entropy(model(selected), torch.tensor([0, 4]))
+        loss.backward()
+        self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()))
+        optimizer.step()
+        restored = RTMWLocalCTR(num_classes=6, channels=(8, 8), main_only=True).eval()
+        restored.load_state_dict(model.state_dict())
+        torch.testing.assert_close(restored(selected), model.eval()(selected))
+
+    def test_worker_selection_and_batch_records_match_epoch_metrics(self):
+        model = RTMWLocalCTR(num_classes=6, channels=(8,), main_only=True)
+        features = torch.randn(3, 5, 4, 133, 1)
+        features[:, 4] = 1
+        labels = torch.tensor([0, 3, 5])
+        masks = torch.ones(3, 4, dtype=torch.bool)
+        from functools import partial
+        collate = partial(collate_rtmw, main_indices=model.main_joint_indices)
+        loader = DataLoader(TensorDataset(features, labels, masks), batch_size=2, collate_fn=collate)
+        selected, _, _ = next(iter(loader))
+        self.assertEqual(selected.shape, (2, 3, 4, 32, 1))
+        torch.testing.assert_close(selected, features[:2, [0, 1, 4]].index_select(3, model.main_joint_indices))
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            records = RunRecords(path, {}, path)
+            try:
+                with patch("isaa.train.write_progress_lines"), patch("isaa.train.finish_progress_lines"):
+                    metrics = run_epoch(model, loader, torch.device("cpu"), records=records, epoch=2)
+            finally:
+                records.close()
+            rows = [json.loads(line) for line in (path / "batches.jsonl").read_text().splitlines()]
+            self.assertEqual([row["samples"] for row in rows], [2, 1])
+            self.assertEqual([row["global_step"] for row in rows], [3, 4])
+            for key in ("loss", "top1", "top5"):
+                expected = sum(row[key] * row["samples"] for row in rows) / 3
+                self.assertAlmostEqual(metrics[key], expected, places=6)
 
     def test_strided_masks_padding_and_missing_odd_frames(self):
         mask = torch.tensor([False, True, False, False, True]).view(1, 1, 5, 1)
