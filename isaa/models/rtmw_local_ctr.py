@@ -258,8 +258,40 @@ class CTRGraphConv(nn.Module):
                          if in_channels != out_channels else None)
 
     def forward(self, x, mask):
-        out = sum(branch(x, mask, self.static_topology[i], self.alpha)
-                  for i, branch in enumerate(self.branches))
+        # Fuse the three CTR branches into one set of CUDA launches. The
+        # parameters remain in ``branches`` so checkpoints and analysis keep
+        # the original branch structure, while the hot path avoids 3 Python
+        # loops x 10 blocks per batch.
+        branch_count = len(self.branches)
+        first = self.branches[0]
+        relation_channels = first.theta.out_channels
+        theta_weight = torch.cat([branch.theta.weight for branch in self.branches], dim=0)
+        theta_bias = torch.cat([branch.theta.bias for branch in self.branches], dim=0)
+        phi_weight = torch.cat([branch.phi.weight for branch in self.branches], dim=0)
+        phi_bias = torch.cat([branch.phi.bias for branch in self.branches], dim=0)
+        feature_weight = torch.cat([branch.feature_proj.weight for branch in self.branches], dim=0)
+        feature_bias = torch.cat([branch.feature_proj.bias for branch in self.branches], dim=0)
+        relation_weight = torch.cat([branch.relation_proj.weight for branch in self.branches], dim=0)
+        relation_bias = torch.cat([branch.relation_proj.bias for branch in self.branches], dim=0)
+        weight = mask.to(x.dtype)
+        count = weight.sum(dim=2).clamp_min(1)
+        query = F.conv2d(x, theta_weight, theta_bias).reshape(
+            x.size(0), branch_count, relation_channels, x.size(2), x.size(3))
+        key = F.conv2d(x, phi_weight, phi_bias).reshape_as(query)
+        query = (query * weight[:, None]).sum(dim=3) / count[:, None]
+        key = (key * weight[:, None]).sum(dim=3) / count[:, None]
+        relation = torch.tanh(query.unsqueeze(-1) - key.unsqueeze(-2))
+        relation = relation.reshape(x.size(0), branch_count * relation_channels, x.size(3), x.size(3))
+        relation = F.conv2d(relation, relation_weight, relation_bias,
+                            groups=branch_count).reshape(
+                                x.size(0), branch_count, first.feature_proj.out_channels,
+                                x.size(3), x.size(3))
+        topology = self.static_topology[None, :, None] + self.alpha * relation
+        feature = F.conv2d(x, feature_weight, feature_bias).reshape(
+            x.size(0), branch_count, first.feature_proj.out_channels, x.size(2), x.size(3))
+        feature = feature.masked_fill(~mask[:, None], 0)
+        out = torch.einsum("bqouv,bqotv->bqotu", topology, feature).sum(dim=1)
+        out = out.masked_fill(~mask, 0)
         residual = x if self.residual is None else self.residual(x, mask)
         return F.relu(self.norm(out, mask) + residual).masked_fill(~mask, 0)
 
