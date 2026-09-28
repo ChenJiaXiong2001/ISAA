@@ -34,7 +34,9 @@ XSet 使用相同的优化参数。
 修改 batch 不自动缩放学习率。主干第 5、8 层时间 stride=2，64 帧降至 16 帧。
 
 **对齐范围是上述训练超参数和主干宽度。** 本项目使用 RTMW 二维相对坐标、置信度、
-32 点拓扑、masked BN 和有效位置平均，不能直接加载官方 25 点模型权重。
+32 点拓扑和有效位置平均，不能直接加载官方 25 点模型权重。
+纯 32 点模式默认使用原生 `BatchNorm2d` 对齐 CTR-GCN 速度；辅助实验默认仍使用 masked BN。
+如需严格保留 mask 统计，可传入 `--no-native-bn`，但速度会下降。
 预处理沿用固定长度随机裁剪、验证中心裁剪及短序列补齐；尚未替换为官方
 `p_interval=[0.5,1]/[0.95]` 裁剪缩放和三维随机旋转。TF32、cuDNN benchmark 仍默认开启。
 这些差异会影响结果，当前实验不代表官方准确率复现。
@@ -57,7 +59,7 @@ python main.py --num-workers 8 --no-cudnn
 `--no-cudnn` 不会切换到 CPU，仍使用 GPU；它适用于 PyTorch CUDA/cuDNN
 版本与系统动态库不匹配的环境，速度需以实际记录为准。
 
-默认即 `--main-only --backbone-width standard --epochs 65 --batch-size 64 --test-batch-size 64`。
+默认即 `--main-only --backbone-width standard --native-bn --epochs 65 --batch-size 64 --test-batch-size 64`。
 原目录中已有 ZIP 时，无需复制：
 
 ```bash

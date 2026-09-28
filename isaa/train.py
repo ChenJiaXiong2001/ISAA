@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
                         help="Width of the two fixed-graph auxiliary layers")
     parser.add_argument("--backbone-width", choices=tuple(RTMWLocalCTR.CHANNEL_PRESETS), default="standard",
                         help="compact: 48/96/192 channels; standard: original 64/128/256")
+    parser.add_argument("--native-bn", action=argparse.BooleanOptionalAction, default=None,
+                        help="Use native BatchNorm2d; default on for main-only, off for masked auxiliary runs")
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--nesterov", action=argparse.BooleanOptionalAction, default=True)
@@ -236,11 +238,12 @@ def _run(args, save_dir, records) -> None:
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
     model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels,
-                         backbone_width=args.backbone_width, main_only=args.main_only).to(device)
+                         backbone_width=args.backbone_width, main_only=args.main_only,
+                         native_bn=args.native_bn).to(device)
     model.set_fine_enabled(not args.main_only and args.fine_start_epoch == 0)
     model_config = {"backbone_width": model.backbone_width, "channels": model.channels,
                     "auxiliary_channels": args.auxiliary_channels, "num_classes": args.num_classes,
-                    "main_only": args.main_only}
+                    "main_only": args.main_only, "native_bn": model.native_bn}
     records.update_config(args=vars(args), model_config=model_config, architecture=model.ARCHITECTURE,
                           optimizer={"name": "SGD", "base_lr": args.lr, "momentum": args.momentum,
                                      "nesterov": args.nesterov, "weight_decay": args.weight_decay},
@@ -255,7 +258,7 @@ def _run(args, save_dir, records) -> None:
                                          "augmentation": {"random_temporal_crop": True}})
     print(f"ISAA {model.experiment_name} backbone=ctr_gcn_32 auxiliary={'off' if args.main_only else 'fixed_71'} "
           f"channels={model.channels} "
-          f"auxiliary_channels={args.auxiliary_channels} device={device} "
+          f"auxiliary_channels={args.auxiliary_channels} bn={'native' if model.native_bn else 'masked'} device={device} "
           f"parameters={sum(p.numel() for p in model.parameters()):,}",
           flush=True)
     print(f"optimizer: SGD lr={args.lr} momentum={args.momentum} nesterov={args.nesterov} "

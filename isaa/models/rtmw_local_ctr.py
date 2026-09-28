@@ -16,11 +16,14 @@ from isaa.models.normalization import _masked_stats_chunk_size
 class PointBatchNorm(nn.Module):
     """Ignore missing observations; support shared or per-channel validity masks."""
 
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, *, native: bool = False) -> None:
         super().__init__()
         self.bn = nn.BatchNorm2d(channels)
+        self.native = bool(native)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        if self.native:
+            return self.bn(x).masked_fill(~mask, 0)
         if not self.training:
             return self.bn(x).masked_fill(~mask, 0)
         stats = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
@@ -230,13 +233,13 @@ class MainNodeCTR(nn.Module):
 
 
 class TemporalConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, dilation=1):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, dilation=1, native_bn=False):
         super().__init__()
         self.stride = stride
         self.conv = nn.Conv2d(in_channels, out_channels, (kernel_size, 1),
                               stride=(stride, 1), padding=(dilation * (kernel_size - 1) // 2, 0),
                               dilation=(dilation, 1))
-        self.norm = PointBatchNorm(out_channels)
+        self.norm = PointBatchNorm(out_channels, native=native_bn)
 
     def forward(self, x, mask):
         return self.norm(self.conv(x.masked_fill(~mask, 0)), _downsample_mask(mask, self.stride))
@@ -245,13 +248,14 @@ class TemporalConv(nn.Module):
 class CTRGraphConv(nn.Module):
     """Three CTR branches, a shared alpha, post-sum BN, and graph residual."""
 
-    def __init__(self, in_channels, out_channels, adjacency):
+    def __init__(self, in_channels, out_channels, adjacency, native_bn=False):
         super().__init__()
         self.static_topology = nn.Parameter(adjacency.clone())
         self.alpha = nn.Parameter(torch.zeros(1))
         self.branches = nn.ModuleList([MainNodeCTR(in_channels, out_channels) for _ in adjacency])
-        self.norm = PointBatchNorm(out_channels)
-        self.residual = TemporalConv(in_channels, out_channels) if in_channels != out_channels else None
+        self.norm = PointBatchNorm(out_channels, native=native_bn)
+        self.residual = (TemporalConv(in_channels, out_channels, native_bn=native_bn)
+                         if in_channels != out_channels else None)
 
     def forward(self, x, mask):
         out = sum(branch(x, mask, self.static_topology[i], self.alpha)
@@ -263,20 +267,23 @@ class CTRGraphConv(nn.Module):
 class MultiScaleTemporalConv(nn.Module):
     """CTR-GCN's two dilated, pooling, and pointwise branches, concatenated."""
 
-    def __init__(self, channels: int, stride: int = 1) -> None:
+    def __init__(self, channels: int, stride: int = 1, native_bn=False) -> None:
         super().__init__()
         if channels % 4:
             raise ValueError("Temporal output channels must be divisible by four")
         self.stride = stride
         width = channels // 4
-        self.projections = nn.ModuleList([TemporalConv(channels, width) for _ in range(3)])
+        self.projections = nn.ModuleList([
+            TemporalConv(channels, width, native_bn=native_bn) for _ in range(3)
+        ])
         self.dilated = nn.ModuleList([
-            TemporalConv(width, width, kernel_size=5, stride=stride, dilation=dilation)
+            TemporalConv(width, width, kernel_size=5, stride=stride, dilation=dilation,
+                         native_bn=native_bn)
             for dilation in (1, 2)
         ])
         self.pool = nn.MaxPool2d((3, 1), stride=(stride, 1), padding=(1, 0))
-        self.pool_norm = PointBatchNorm(width)
-        self.pointwise = TemporalConv(channels, width, stride=stride)
+        self.pool_norm = PointBatchNorm(width, native=native_bn)
+        self.pointwise = TemporalConv(channels, width, stride=stride, native_bn=native_bn)
 
     def forward(self, x, mask):
         out_mask = _downsample_mask(mask, self.stride)
@@ -288,12 +295,12 @@ class MultiScaleTemporalConv(nn.Module):
 
 
 class CTRGCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, adjacency, stride=1, residual=True):
+    def __init__(self, in_channels, out_channels, adjacency, stride=1, residual=True, native_bn=False):
         super().__init__()
         self.stride = stride
         self.use_residual = residual
-        self.gcn = CTRGraphConv(in_channels, out_channels, adjacency)
-        self.temporal = MultiScaleTemporalConv(out_channels, stride)
+        self.gcn = CTRGraphConv(in_channels, out_channels, adjacency, native_bn=native_bn)
+        self.temporal = MultiScaleTemporalConv(out_channels, stride, native_bn=native_bn)
         self.residual = (TemporalConv(in_channels, out_channels, stride=stride)
                          if residual and (in_channels != out_channels or stride != 1) else None)
 
@@ -315,7 +322,8 @@ class RTMWLocalCTR(nn.Module):
     ARCHITECTURE = "rtmw_ctr32_face6_input_v4"
 
     def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16,
-                 backbone_width: str = "compact", main_only: bool = False) -> None:
+                 backbone_width: str = "compact", main_only: bool = False,
+                 native_bn: bool | None = None) -> None:
         super().__init__()
         if backbone_width not in self.CHANNEL_PRESETS:
             raise ValueError(f"Unknown backbone width: {backbone_width!r}")
@@ -327,6 +335,7 @@ class RTMWLocalCTR(nn.Module):
             raise ValueError("channels must contain positive multiples of four")
         self.channels = channels
         self.main_only = bool(main_only)
+        self.native_bn = self.main_only if native_bn is None else bool(native_bn)
         if self.main_only:
             self.ARCHITECTURE = "rtmw_ctr32_only_v5"
         partition = build_region_partition("rtmw_133", 133)
@@ -342,12 +351,13 @@ class RTMWLocalCTR(nn.Module):
         self.register_buffer("main_graph", main_graph)
         # Per-joint statistics are shared across people, allowing masked empty
         # tracks without requiring a fixed number of people.
-        self.input_norm = PointBatchNorm(3 * centers.numel())
+        self.input_norm = PointBatchNorm(3 * centers.numel(), native=self.native_bn)
         self.blocks = nn.ModuleList()
         in_channels = 3
         for index, out_channels in enumerate(channels):
             self.blocks.append(CTRGCNBlock(in_channels, out_channels, main_graph,
-                                          stride=2 if index in (4, 7) else 1, residual=index != 0))
+                                          stride=2 if index in (4, 7) else 1, residual=index != 0,
+                                          native_bn=self.native_bn))
             in_channels = out_channels
         if not self.main_only:
             self.face_compression = FaceTokenCompression(graph, self.joint_to_main)
