@@ -35,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--max-samples", type=int, default=0)
+    parser.add_argument("--num-main-nodes", type=int, default=32,
+                        help="Keep this many RTMW region-center nodes; ignored with --keep-all-nodes")
+    parser.add_argument("--keep-all-nodes", action="store_true",
+                        help="Write all 133 RTMW nodes for the full-detail experiment")
     return parser.parse_args()
 
 
@@ -91,10 +95,13 @@ def main() -> None:
     register_skeleton_presets()
     archive = Path(args.archive).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
-    model = RTMWLocalCTR(num_classes=args.num_classes, main_only=True)
+    model = RTMWLocalCTR(num_classes=args.num_classes, main_only=True,
+                         main_node_count=args.num_main_nodes)
+    main_indices = (torch.arange(133, dtype=torch.long)
+                    if args.keep_all_nodes else model.main_joint_indices.cpu())
     print(f"archive={archive}", flush=True)
-    print(f"main_nodes={model.main_joint_indices.tolist()}", flush=True)
-    convert_dataset(archive, output, args, model.main_joint_indices.cpu())
+    print(f"main_nodes={main_indices.tolist()}", flush=True)
+    convert_dataset(archive, output, args, main_indices)
     print(f"completed: {output}", flush=True)
 
 

@@ -28,8 +28,8 @@ class RTMWNpyDataset(Dataset):
             raise FileNotFoundError(f"预处理目录必须包含 data.npy 和 labels.npy: {directory}")
         self.data = np.load(data_path, mmap_mode="r")
         self.labels = np.load(labels_path, mmap_mode="r")
-        if self.data.ndim != 5 or self.data.shape[1] != 3 or self.data.shape[3] != 32:
-            raise ValueError(f"data.npy 必须是 N x 3 x T x 32 x M，当前为 {self.data.shape}")
+        if self.data.ndim != 5 or self.data.shape[1] != 3 or self.data.shape[3] not in (25, 32, 133):
+            raise ValueError(f"data.npy 必须是 N x 3 x T x (25/32/133) x M，当前为 {self.data.shape}")
         if self.labels.ndim != 1 or self.labels.shape[0] != self.data.shape[0]:
             raise ValueError("labels.npy 必须是一维且样本数与 data.npy 一致")
         self.frame_mask = None

@@ -44,6 +44,8 @@ def parse_args() -> argparse.Namespace:
                         help="Preprocessed root containing train/ and val/ data.npy + labels.npy")
     parser.add_argument("--input-bn1d", action="store_true",
                         help="Use one ordinary nn.BatchNorm1d across 3x32 input channels")
+    parser.add_argument("--num-main-nodes", type=int, default=32,
+                        help="Number of RTMW region-center nodes used by the main branch")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--test-batch-size", type=int, default=64)
@@ -217,7 +219,7 @@ def run_epoch(
 
 def main() -> None:
     args = parse_args()
-    variant = "rtmw_ctr32_only_v5" if args.main_only else RTMWLocalCTR.ARCHITECTURE
+    variant = f"rtmw_ctr{args.num_main_nodes}_only_v5" if args.main_only else RTMWLocalCTR.ARCHITECTURE
     if args.input_bn1d:
         variant += "_inputbn1d"
     base = (Path(args.save_dir) if args.save_dir else
@@ -266,12 +268,13 @@ def _run(args, save_dir, records) -> None:
     model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels,
                          backbone_width=args.backbone_width, main_only=args.main_only,
                          native_bn=args.native_bn,
-                         input_norm="bn1d" if args.input_bn1d else "point_bn2d").to(device)
+                         input_norm="bn1d" if args.input_bn1d else "point_bn2d",
+                         main_node_count=args.num_main_nodes).to(device)
     model.set_fine_enabled(not args.main_only and args.fine_start_epoch == 0)
     model_config = {"backbone_width": model.backbone_width, "channels": model.channels,
                     "auxiliary_channels": args.auxiliary_channels, "num_classes": args.num_classes,
                     "main_only": args.main_only, "native_bn": model.native_bn,
-                    "input_norm": model.input_norm_type}
+                    "input_norm": model.input_norm_type, "main_node_count": model.main_node_count}
     records.update_config(args=vars(args), model_config=model_config, architecture=model.ARCHITECTURE,
                           optimizer={"name": "SGD", "base_lr": args.lr, "momentum": args.momentum,
                                      "nesterov": args.nesterov, "weight_decay": args.weight_decay},
@@ -285,7 +288,7 @@ def _run(args, save_dir, records) -> None:
                                          "crop": ("precomputed fixed window" if args.npy_dir else
                                                   "random fixed window / center validation, pad short clips"),
                                          "augmentation": {"random_temporal_crop": not bool(args.npy_dir)}})
-    print(f"ISAA {model.experiment_name} backbone=ctr_gcn_32 auxiliary={'off' if args.main_only else 'fixed_71'} "
+    print(f"ISAA {model.experiment_name} backbone=ctr_gcn_{args.num_main_nodes} auxiliary={'off' if args.main_only else 'fixed_71'} "
           f"channels={model.channels} "
           f"auxiliary_channels={args.auxiliary_channels} bn={'native' if model.native_bn else 'masked'} "
           f"input_norm={model.input_norm_type} device={device} "

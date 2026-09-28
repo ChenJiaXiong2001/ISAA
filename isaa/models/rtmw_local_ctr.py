@@ -355,7 +355,8 @@ class RTMWLocalCTR(nn.Module):
 
     def __init__(self, num_classes: int = 120, *, channels=None, auxiliary_channels: int = 16,
                  backbone_width: str = "compact", main_only: bool = False,
-                 native_bn: bool | None = None, input_norm: str = "point_bn2d") -> None:
+                 native_bn: bool | None = None, input_norm: str = "point_bn2d",
+                 main_node_count: int = 32) -> None:
         super().__init__()
         if backbone_width not in self.CHANNEL_PRESETS:
             raise ValueError(f"Unknown backbone width: {backbone_width!r}")
@@ -371,10 +372,14 @@ class RTMWLocalCTR(nn.Module):
         self.input_norm_type = str(input_norm).strip().lower()
         if self.input_norm_type not in {"point_bn2d", "bn1d"}:
             raise ValueError("input_norm 只支持 point_bn2d 或 bn1d")
+        self.main_node_count = int(main_node_count)
+        if self.main_node_count < 1 or self.main_node_count > 32:
+            raise ValueError("main_node_count 必须在 1..32 之间")
         if self.main_only:
             self.ARCHITECTURE = "rtmw_ctr32_only_v5"
         partition = build_region_partition("rtmw_133", 133)
-        centers = torch.tensor(partition.center_joint_indices, dtype=torch.long)
+        all_centers = torch.tensor(partition.center_joint_indices, dtype=torch.long)
+        centers = all_centers[: self.main_node_count]
         self.register_buffer("main_joint_indices", centers)
         self.register_buffer("joint_to_main", torch.tensor(partition.joint_to_region, dtype=torch.long))
         self.register_buffer("fine_stage", torch.tensor(not self.main_only))
@@ -451,7 +456,7 @@ class RTMWLocalCTR(nn.Module):
     def forward(self, x, valid_frame_mask=None, *, return_node_features=False):
         if x.ndim == 4:
             x = x.unsqueeze(-1)
-        allowed_nodes = (32, 133) if self.main_only else (133,)
+        allowed_nodes = (self.main_node_count, 133) if self.main_only else (133,)
         if x.ndim != 5 or x.size(1) != 3 or x.size(3) not in allowed_nodes:
             raise ValueError(f"Expected B x 3 x T x N x M; N must be in {allowed_nodes}")
         b, c, t, n, m = x.shape
@@ -472,14 +477,16 @@ class RTMWLocalCTR(nn.Module):
             regional, region_mask = self.regional_pool(auxiliary, auxiliary_mask)
         # A 32-node input is already ordered by main_joint_indices. The trainer
         # selects it in workers after RTMW torso normalization, before transfer.
-        main = x if n == 32 else x.index_select(-1, self.main_joint_indices)
-        main_mask = mask if n == 32 else mask.index_select(-1, self.main_joint_indices)
+        main = x if n == self.main_node_count else x.index_select(-1, self.main_joint_indices)
+        main_mask = mask if n == self.main_node_count else mask.index_select(-1, self.main_joint_indices)
         if self.input_norm_type == "bn1d":
             main = self.input_norm(main, main_mask)
         else:
-            norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
-            main = main.permute(0, 1, 3, 2).reshape(b * m, c * 32, t, 1)
-            main = self.input_norm(main, norm_mask).reshape(b * m, c, 32, t).permute(0, 1, 3, 2)
+            norm_mask = main_mask.expand_as(main).permute(0, 1, 3, 2).reshape(
+                b * m, c * self.main_node_count, t, 1)
+            main = main.permute(0, 1, 3, 2).reshape(b * m, c * self.main_node_count, t, 1)
+            main = self.input_norm(main, norm_mask).reshape(
+                b * m, c, self.main_node_count, t).permute(0, 1, 3, 2)
         temporal_stride = 1
         for index, block in enumerate(self.blocks):
             main, main_mask = block(main, main_mask)
