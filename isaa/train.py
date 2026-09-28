@@ -218,9 +218,17 @@ def _run(args, save_dir, records) -> None:
     device = torch.device(
         ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     )
+    cudnn_version = None
     if device.type == "cpu":
         torch.set_num_threads(min(8, torch.get_num_threads()))
     elif device.type == "cuda":
+        if args.cudnn:
+            try:
+                cudnn_version = torch.backends.cudnn.version()
+            except RuntimeError as exc:
+                print(f"warning: cuDNN initialization failed; falling back to native CUDA kernels: {exc}",
+                      flush=True)
+                args.cudnn = False
         torch.backends.cudnn.enabled = args.cudnn
         torch.backends.cudnn.benchmark = args.cudnn
         torch.backends.cudnn.allow_tf32 = args.tf32
@@ -240,7 +248,7 @@ def _run(args, save_dir, records) -> None:
                           runtime={"torch": torch.__version__, "cuda": torch.version.cuda,
                                    "device": str(device), "gpu": torch.cuda.get_device_name(device)
                                    if device.type == "cuda" else None,
-                                   "cudnn": torch.backends.cudnn.version() if device.type == "cuda" else None,
+                                   "cudnn": cudnn_version,
                                    "cudnn_enabled": torch.backends.cudnn.enabled},
                           preprocessing={"channels": ["relative_x", "relative_y", "score"],
                                          "crop": "random fixed window / center validation, pad short clips",
