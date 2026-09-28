@@ -60,6 +60,8 @@ python main.py --num-workers 8 --no-cudnn
 版本与系统动态库不匹配的环境，速度需以实际记录为准。
 
 默认即 `--main-only --backbone-width standard --native-bn --epochs 65 --batch-size 64 --test-batch-size 64`。
+CUDA 默认启用 `torch.compile(mode=reduce-overhead)`；首次 batch 会有一次编译等待，
+后续训练速度明显提高。若当前 PyTorch/驱动不支持，可使用 `--no-compile`。
 原目录中已有 ZIP 时，无需复制：
 
 ```bash
@@ -96,9 +98,10 @@ outputs/rtmw_ctr32_only_v5_standard_sgd/xsub120/<时间戳-运行ID>/
 `--save-dir` 指定父目录，其下仍创建独立运行子目录，重复启动不会覆盖旧实验。
 批记录包含 epoch、phase、step、该阶段累计 global_step、样本数、loss、Top1、Top5、lr、
 数据等待和计算/指标同步耗时。文件中的准确率为 0～1，控制台显示百分比。
-每批行缓冲写出，逐轮 CSV 刷新；JSON 状态及 checkpoint 使用临时文件替换。
+batch 指标先在 GPU 累积，每轮结束后一次性传回 CPU 写出，避免每个 batch 强制同步；
+逐轮 CSV 刷新；JSON 状态及 checkpoint 使用临时文件替换。
 进度条原地刷新不写入日志；每批明细由 JSONL 保存，避免控制字符污染文件。
-指标逐批传回 CPU 会产生同步开销，吞吐统计包含此开销。
+批明细在 epoch 结束时写入，进程在 epoch 中途被强制终止时，当前 epoch 的批明细可能尚未落盘。
 
 正常完成记录为 completed；Ctrl+C 为 interrupted；Python 异常为 failed，并保留已写出的记录。
 进程被强制终止或机器断电时无法执行结束处理，status 可能仍为 running，应查看 JSONL 和 checkpoint。
@@ -140,5 +143,7 @@ python -m unittest discover -s tests -v
 参数解析、语法及 diff 格式检查通过。
 2026-09-28：远程 RTX A6000 已确认 CUDA 原生卷积可用；该机 PyTorch 2.14.0+cu130
 与系统 CUDA 12.5 的 cuDNN 加载不兼容，增加 `--no-cudnn` 兼容开关。
+原生 BN 基准约 51.5 samples/s；`torch.compile(reduce-overhead)` 稳定阶段约 190 samples/s，
+具体训练吞吐仍需以真实 ZIP、日志和 batch 配置为准。
 本机当前缺少 PyTorch，模型测试在导入 torch 时中止，需在安装依赖的环境运行；
 未进行新实验的完整训练。

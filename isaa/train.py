@@ -53,6 +53,10 @@ def parse_args() -> argparse.Namespace:
                         help="compact: 48/96/192 channels; standard: original 64/128/256")
     parser.add_argument("--native-bn", action=argparse.BooleanOptionalAction, default=None,
                         help="Use native BatchNorm2d; default on for main-only, off for masked auxiliary runs")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=None,
+                        help="Use torch.compile on CUDA; default on for CUDA and off for CPU")
+    parser.add_argument("--compile-mode", choices=("default", "reduce-overhead", "max-autotune"),
+                        default="reduce-overhead")
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--nesterov", action=argparse.BooleanOptionalAction, default=True)
@@ -124,6 +128,10 @@ def run_epoch(
     last_refresh = stage_started_at
     batch_fetch_started = stage_started_at
     data_wait_seconds = 0.0
+    record_values = (torch.empty((total_steps, 3), device=device, dtype=torch.float32)
+                     if records is not None else None)
+    record_wait = []
+    record_host_seconds = []
     try:
         with torch.set_grad_enabled(training):
             for step, (x, labels, frame_mask) in enumerate(loader, start=1):
@@ -152,16 +160,10 @@ def run_epoch(
                     totals += torch.stack((loss.detach() * count, correct, correct_top5)).to(totals.dtype)
                 total += count
                 if records is not None:
-                    batch_loss, batch_correct, batch_top5 = torch.stack(
-                        (loss.detach(), correct, correct_top5)).cpu().tolist()
-                    records.batch({
-                        "epoch": epoch, "phase": "train" if training else "val", "step": step,
-                        "global_step": (epoch - 1) * total_steps + step,
-                        "samples": count, "loss": batch_loss, "top1": batch_correct / count,
-                        "top5": batch_top5 / count, "lr": learning_rate,
-                        "data_wait_seconds": batch_wait,
-                        "compute_and_metrics_seconds": time.perf_counter() - batch_started,
-                    })
+                    record_values[step - 1].copy_(torch.stack(
+                        (loss.detach(), correct.float(), correct_top5.float())))
+                    record_wait.append(batch_wait)
+                    record_host_seconds.append(time.perf_counter() - batch_started)
                 now = time.perf_counter()
                 if step == 1 or now - last_refresh >= log_interval:
                     total_completed = min(completed_before + step, total_units)
@@ -181,6 +183,21 @@ def run_epoch(
                 min(completed_before + total_steps, total_units), total_units, now - run_started_at
             ),
         ))
+        if records is not None:
+            values = record_values[:total].cpu().tolist()
+            phase = "train" if training else "val"
+            for index, (batch_loss, batch_correct, batch_top5) in enumerate(values):
+                count = int(loader.batch_size or 1)
+                if index == total_steps - 1 and total_steps * count != total:
+                    count = total - index * count
+                records.batch({
+                    "epoch": epoch, "phase": phase, "step": index + 1,
+                    "global_step": (epoch - 1) * total_steps + index + 1,
+                    "samples": count, "loss": batch_loss, "top1": batch_correct / count,
+                    "top5": batch_top5 / count, "lr": learning_rate,
+                    "data_wait_seconds": record_wait[index],
+                    "host_batch_seconds": record_host_seconds[index],
+                })
     finally:
         finish_progress_lines()
     return {
@@ -286,6 +303,15 @@ def _run(args, save_dir, records) -> None:
               f"finite={torch.isfinite(result['logits']).all().item()}")
         return
 
+    compile_enabled = args.compile if args.compile is not None else device.type == "cuda"
+    train_model = model
+    if compile_enabled:
+        if not hasattr(torch, "compile"):
+            raise RuntimeError("--compile requested, but this PyTorch has no torch.compile")
+        print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
+        train_model = torch.compile(model, mode=args.compile_mode)
+    records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode})
+
     archive = Path(args.archive)
     if not archive.is_absolute():
         archive = PROJECT_ROOT / archive
@@ -314,7 +340,7 @@ def _run(args, save_dir, records) -> None:
 
     records.update_config(dataset=dataset_info, archive=str(archive.resolve()),
                           archive_bytes=archive.stat().st_size, archive_mtime_ns=archive.stat().st_mtime_ns)
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum,
+    optimizer = torch.optim.SGD(train_model.parameters(), lr=args.lr, momentum=args.momentum,
                                 nesterov=args.nesterov, weight_decay=args.weight_decay)
     best_accuracy = -1.0
     best_epoch = 0
@@ -339,14 +365,14 @@ def _run(args, save_dir, records) -> None:
         print(f"Training epoch: {epoch}/{args.epochs} stage={stage} "
               f"lr={optimizer.param_groups[0]['lr']:.8g}", flush=True)
         train_metrics = run_epoch(
-            model, loaders["train"], device, optimizer, progress_context=progress_context,
+            train_model, loaders["train"], device, optimizer, progress_context=progress_context,
             log_interval=args.log_interval,
             records=records, epoch=epoch, learning_rate=learning_rate,
         )
         print(f"Eval epoch: {epoch}/{args.epochs}", flush=True)
         progress_context["completed_before"] = completed_before + train_steps
         val_metrics = run_epoch(
-            model, loaders["val"], device, progress_context=progress_context, log_interval=args.log_interval,
+            train_model, loaders["val"], device, progress_context=progress_context, log_interval=args.log_interval,
             records=records, epoch=epoch, learning_rate=learning_rate,
         )
         total_elapsed = time.perf_counter() - training_started_at
