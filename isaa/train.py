@@ -67,6 +67,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=float, default=0.5, help="Progress refresh interval in seconds")
     parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True,
                         help="Allow CUDA TF32 matmul/convolution; --no-tf32 uses full FP32 precision")
+    parser.add_argument("--cudnn", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use cuDNN for CUDA convolutions; --no-cudnn uses PyTorch native CUDA kernels")
     parser.add_argument("--max-samples", type=int, default=0, help="Per split; 0 uses all samples")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     parser.add_argument("--save-dir", default=None, help="Parent directory; each run creates a unique subdirectory")
@@ -219,7 +221,8 @@ def _run(args, save_dir, records) -> None:
     if device.type == "cpu":
         torch.set_num_threads(min(8, torch.get_num_threads()))
     elif device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.enabled = args.cudnn
+        torch.backends.cudnn.benchmark = args.cudnn
         torch.backends.cudnn.allow_tf32 = args.tf32
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
@@ -236,7 +239,9 @@ def _run(args, save_dir, records) -> None:
                           main_joint_indices=model.main_joint_indices.cpu().tolist(),
                           runtime={"torch": torch.__version__, "cuda": torch.version.cuda,
                                    "device": str(device), "gpu": torch.cuda.get_device_name(device)
-                                   if device.type == "cuda" else None},
+                                   if device.type == "cuda" else None,
+                                   "cudnn": torch.backends.cudnn.version() if device.type == "cuda" else None,
+                                   "cudnn_enabled": torch.backends.cudnn.enabled},
                           preprocessing={"channels": ["relative_x", "relative_y", "score"],
                                          "crop": "random fixed window / center validation, pad short clips",
                                          "augmentation": {"random_temporal_crop": True}})
@@ -250,7 +255,8 @@ def _run(args, save_dir, records) -> None:
           f"steps_zero_based={args.lr_steps} decay={args.lr_decay} epochs={args.epochs}", flush=True)
     print(f"records: {save_dir}", flush=True)
     if device.type == "cuda":
-        print(f"runtime: gpu={torch.cuda.get_device_name(device)} tf32={args.tf32} cudnn_benchmark=True",
+        print(f"runtime: gpu={torch.cuda.get_device_name(device)} tf32={args.tf32} "
+              f"cudnn={args.cudnn} cudnn_benchmark={args.cudnn}",
               flush=True)
     print(f"runtime: batch_size={args.batch_size} num_workers={args.num_workers} "
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "

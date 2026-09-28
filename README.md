@@ -48,6 +48,15 @@ Python 3.10+，依赖见 `requirements.txt`；GPU 训练需要安装支持 CUDA 
 python main.py --num-workers 8
 ```
 
+如果远程机出现 `CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED`，使用 native CUDA kernel：
+
+```bash
+python main.py --num-workers 8 --no-cudnn
+```
+
+`--no-cudnn` 不会切换到 CPU，仍使用 GPU；它适用于 PyTorch CUDA/cuDNN
+版本与系统动态库不匹配的环境，速度需以实际记录为准。
+
 默认即 `--main-only --backbone-width standard --epochs 65 --batch-size 64 --test-batch-size 64`。
 原目录中已有 ZIP 时，无需复制：
 
@@ -127,5 +136,7 @@ python -m unittest discover -s tests -v
 缺失点、模型前向/反向、checkpoint 和逐批指标汇总。
 2026-09-12：两个无 PyTorch 依赖的测试通过，65 轮学习率与本机官方实现逐轮一致，
 参数解析、语法及 diff 格式检查通过。
+2026-09-28：远程 RTX A6000 已确认 CUDA 原生卷积可用；该机 PyTorch 2.14.0+cu130
+与系统 CUDA 12.5 的 cuDNN 加载不兼容，增加 `--no-cudnn` 兼容开关。
 本机当前缺少 PyTorch，模型测试在导入 torch 时中止，需在安装依赖的环境运行；
 未进行新实验的完整训练。
