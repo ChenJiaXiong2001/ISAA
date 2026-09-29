@@ -23,7 +23,7 @@ from isaa.data.rtmw_zip_dataset import RTMWZipDataset
 from isaa.data.rtmw_npy_dataset import RTMWNpyDataset
 from isaa.data.ntu_preprocessed_dataset import NTUPreprocessedDataset
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
-from isaa.models.body_local_fusion import BodyLocalFusion
+from isaa.models.body_local_fusion import BodyLocalFusion, BodyLocalFullFusion
 from isaa.models.original_ctrgcn import (
     OriginalCTRGCN,
     build_official_ntu_adjacency,
@@ -69,8 +69,8 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local"), default=None,
-                        help="isaa: existing model; original: CTR-GCN baseline; body-local: experimental 22+48 fusion")
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-full"), default=None,
+                        help="isaa/original baselines; body-local is light baseline; body-local-full is full ST-GCN")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
     parser.add_argument("--max-persons", type=int, default=2,
@@ -159,12 +159,12 @@ def parse_args() -> argparse.Namespace:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if args.node_count is None:
         args.node_count = args.num_main_nodes
-    if args.model_variant == "body-local":
+    if args.model_variant in {"body-local", "body-local-full"}:
         args.main_only = False
         args.node_count = 133
         args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
         if args.feature_mode != "raw":
-            parser.error("--model-variant body-local requires raw x/y/score features")
+            parser.error("body-local/body-local-full require raw x/y/score features")
     elif args.model_variant == "original":
         # The official model consumes all 133 RTMW joints and raw x/y/score.
         args.main_only = False
@@ -329,6 +329,8 @@ def main() -> None:
     args = parse_args()
     if args.model_variant == "body-local":
         variant = BodyLocalFusion.ARCHITECTURE
+    elif args.model_variant == "body-local-full":
+        variant = BodyLocalFullFusion.ARCHITECTURE
     elif args.model_variant == "original":
         variant = f"{OriginalCTRGCN.ARCHITECTURE}_n{args.node_count}"
         if args.ablation_stage == "s03_original32_aux":
@@ -384,6 +386,12 @@ def _run(args, save_dir, records) -> None:
     if args.model_variant == "body-local":
         model = BodyLocalFusion(num_classes=args.num_classes).to(device)
         model_config = {"variant": "body-local", "num_classes": args.num_classes,
+                        "body_indices": list(model.BODY_INDICES), "hand_indices": list(model.HAND_INDICES),
+                        "face_tokens": 6, "local_nodes": 48,
+                        "body_channels": model.CHANNELS, "local_channels": model.LOCAL_CHANNELS}
+    elif args.model_variant == "body-local-full":
+        model = BodyLocalFullFusion(num_classes=args.num_classes).to(device)
+        model_config = {"variant": "body-local-full", "num_classes": args.num_classes,
                         "body_indices": list(model.BODY_INDICES), "hand_indices": list(model.HAND_INDICES),
                         "face_tokens": 6, "local_nodes": 48,
                         "body_channels": model.CHANNELS, "local_channels": model.LOCAL_CHANNELS}
@@ -447,7 +455,7 @@ def _run(args, save_dir, records) -> None:
                     else "config/nturgbd120-cross-subject/default.yaml")),
         "schedule": "main.py:adjust_learning_rate (zero-based milestones)",
         "adaptation": ("experimental body22 CTR-GCN + hand42/face6 ST-GCN, normalized features, pre-classifier fusion"
-                       if args.model_variant == "body-local" else
+                       if args.model_variant in {"body-local", "body-local-full"} else
                        (f"official RTMW induced {args.node_count}-node graph, raw x/y/score, ordinary BN, no masks"
                         if args.model_variant == "original" else
                         "RTMW relative xy/score, masks, 32 joints; existing crop/pad preprocessing")),
@@ -480,6 +488,9 @@ def _run(args, save_dir, records) -> None:
     elif args.model_variant == "body-local":
         print(f"BodyLocalFusion RTMW body22+hand42+face6 device={device} "
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    elif args.model_variant == "body-local-full":
+        print(f"BodyLocalFullFusion RTMW body22+hand42+face6 device={device} "
+              f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     else:
         print(f"ISAA {model.experiment_name} backbone=ctr_gcn_{args.num_main_nodes} auxiliary={'off' if args.main_only else 'fixed_71'} "
               f"channels={model.channels} "
@@ -499,8 +510,8 @@ def _run(args, save_dir, records) -> None:
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "
           f"prefetch_factor={args.prefetch_factor if args.num_workers > 0 else None}", flush=True)
     if args.dry_run:
-        people = args.max_persons if args.model_variant in {"original", "body-local"} else 2
-        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local"} else (
+        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-full"} else 2
+        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-full"} else (
             args.node_count if args.main_only else 133
         )
         x = torch.randn(2, 3, args.window_size, synthetic_nodes, people, device=device)
@@ -513,7 +524,7 @@ def _run(args, save_dir, records) -> None:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
-            elif args.model_variant == "body-local":
+            elif args.model_variant in {"body-local", "body-local-full"}:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
@@ -540,7 +551,7 @@ def _run(args, save_dir, records) -> None:
     loaders = {}
     dataset_info = {}
     if args.npy_dir:
-        if args.model_variant in {"original", "body-local"}:
+        if args.model_variant in {"original", "body-local", "body-local-full"}:
             npy_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         elif args.main_only:
             npy_indices = model.main_joint_indices.cpu()
@@ -548,7 +559,7 @@ def _run(args, save_dir, records) -> None:
             npy_indices = None
         collate = partial(collate_preprocessed, main_indices=npy_indices)
     else:
-        if args.model_variant in {"original", "body-local"}:
+        if args.model_variant in {"original", "body-local", "body-local-full"}:
             main_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         else:
             main_indices = model.main_joint_indices.cpu() if args.main_only else None
@@ -635,6 +646,8 @@ def _run(args, save_dir, records) -> None:
             stage = args.ablation_stage or "original_ctrgcn"
         elif args.model_variant == "body-local":
             stage = "body22_ctr+hands42_face6_stgcn"
+        elif args.model_variant == "body-local-full":
+            stage = "body22_ctr+hands42_face6_stgcn_full"
         else:
             stage = "ctr32+aux71" if model.fine_enabled else "ctr32_only"
         print(f"Training epoch: {epoch}/{args.epochs} stage={stage} "

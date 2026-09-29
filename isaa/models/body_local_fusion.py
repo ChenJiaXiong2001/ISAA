@@ -44,6 +44,7 @@ class BodyLocalFusion(nn.Module):
     HAND_INDICES = tuple(range(91, 133))
     CHANNELS = (48, 48, 48, 48, 96, 96, 96, 192, 192, 192)
     LOCAL_CHANNELS = (24, 24, 48, 48)
+    LOCAL_STRIDES = (1,)
 
     def __init__(self, num_classes: int = 120, body_channels=None, local_channels=None):
         super().__init__()
@@ -79,7 +80,7 @@ class BodyLocalFusion(nn.Module):
         self.local_blocks = nn.ModuleList()
         cin = 3
         for i, cout in enumerate(local_channels):
-            stride = 2 if i == 1 else 1
+            stride = 2 if i in self.LOCAL_STRIDES else 1
             self.local_blocks.append(LocalSTBlock(cin, cout, face_hand_graph, stride))
             cin = cout
         self.body_projection = nn.Sequential(nn.Linear(body_channels[-1], 192), nn.ReLU())
@@ -125,4 +126,13 @@ class BodyLocalFusion(nn.Module):
         bv = self._masked_pool(body, bm).reshape(b,m,-1).mean(1)
         lv = self._masked_pool(local, lm).reshape(b,m,-1).mean(1)
         return self.classifier(torch.cat((self.body_projection(bv), self.local_projection(lv)), dim=1))
+
+
+class BodyLocalFullFusion(BodyLocalFusion):
+    """Full-width 10-layer ST-GCN local branch for comparison with baseline."""
+
+    ARCHITECTURE = "rtmw_ctr22_st48_handface_full"
+    CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
+    LOCAL_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
+    LOCAL_STRIDES = (4, 7)
 
