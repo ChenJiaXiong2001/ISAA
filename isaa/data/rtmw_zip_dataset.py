@@ -239,6 +239,7 @@ class RTMWZipDataset(Dataset):
         layout: str,
         max_persons: int = 2,
         score_normalization: str = "auto",
+        feature_mode: str = "isaa",
         augment: bool = False,
         augmentation_config: dict[str, Any] | None = None,
         deterministic_temporal_crop: str = "center",
@@ -294,6 +295,12 @@ class RTMWZipDataset(Dataset):
             raise ValueError(
                 "score_normalization 必须是 auto/clip/sigmoid，"
                 f"当前为 {score_normalization!r}"
+            )
+        self.feature_mode = str(feature_mode).strip().lower()
+        if self.feature_mode not in {"isaa", "raw"}:
+            raise ValueError(
+                "feature_mode 只支持 isaa/raw，"
+                f"当前为 {feature_mode!r}"
             )
         self.augment = bool(augment)
         self.augmentation_config = augmentation_config or {}
@@ -402,6 +409,13 @@ class RTMWZipDataset(Dataset):
 
         point_valid = raw[2:3] > 0
         raw[:2] = raw[:2] * point_valid
+        if self.feature_mode == "raw":
+            # The official CTR-GCN path consumes the original three channels
+            # (x, y, score).  Padded frames are zeroed because the official
+            # model does not consume a validity mask.
+            raw = raw.masked_fill(~valid_frame_mask[None, :, None, None], 0)
+            label = torch.tensor(int(self.labels[index]), dtype=torch.long)
+            return raw.contiguous(), label, valid_frame_mask.contiguous()
         features = build_skeleton_feature_channels(
             raw,
             layout=self.layout,

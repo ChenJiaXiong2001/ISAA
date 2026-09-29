@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 from isaa.graph.adjacency import build_joint_spatial_partitions, normalize_adjacency_partitions
 from isaa.graph.regions import build_region_partition
+from isaa.layouts.rtmw_133 import get_rtmw_node_indices
 from isaa.models.normalization import PlainSkeletonBatchNorm1d, _masked_stats_chunk_size
 
 
@@ -345,7 +346,12 @@ class CTRGCNBlock(nn.Module):
 
 
 class RTMWLocalCTR(nn.Module):
-    """32-node CTR-GCN with early per-region fusion of all 133 joints."""
+    """Progressive RTMW CTR-GCN with 25/32-node coarse stages.
+
+    The model still accepts a full 133-node tensor when the auxiliary branch
+    is enabled.  Main-only runs may receive either the canonical 25-node
+    semantic order or the canonical 32-node region-center order.
+    """
 
     STANDARD_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
     COMPACT_CHANNELS = (48, 48, 48, 48, 96, 96, 96, 192, 192, 192)
@@ -373,13 +379,14 @@ class RTMWLocalCTR(nn.Module):
         if self.input_norm_type not in {"point_bn2d", "bn1d"}:
             raise ValueError("input_norm 只支持 point_bn2d 或 bn1d")
         self.main_node_count = int(main_node_count)
-        if self.main_node_count < 1 or self.main_node_count > 32:
-            raise ValueError("main_node_count 必须在 1..32 之间")
+        if self.main_node_count not in {25, 32, 50, 71}:
+            raise ValueError("main_node_count 当前只支持 RTMW 的 25、32、50 或 71 节点")
         if self.main_only:
-            self.ARCHITECTURE = "rtmw_ctr32_only_v5"
+            self.ARCHITECTURE = f"rtmw_ctr{self.main_node_count}_only_v5"
+        else:
+            self.ARCHITECTURE = f"rtmw_ctr{self.main_node_count}_face6_input_v4"
         partition = build_region_partition("rtmw_133", 133)
-        all_centers = torch.tensor(partition.center_joint_indices, dtype=torch.long)
-        centers = all_centers[: self.main_node_count]
+        centers = torch.tensor(get_rtmw_node_indices(self.main_node_count), dtype=torch.long)
         self.register_buffer("main_joint_indices", centers)
         self.register_buffer("joint_to_main", torch.tensor(partition.joint_to_region, dtype=torch.long))
         self.register_buffer("fine_stage", torch.tensor(not self.main_only))
@@ -475,7 +482,7 @@ class RTMWLocalCTR(nn.Module):
             auxiliary_input, auxiliary_mask = self.face_compression(x, mask)
             auxiliary = self.auxiliary(auxiliary_input, auxiliary_mask)
             regional, region_mask = self.regional_pool(auxiliary, auxiliary_mask)
-        # A 32-node input is already ordered by main_joint_indices. The trainer
+        # A cropped input is already ordered by main_joint_indices. The trainer
         # selects it in workers after RTMW torso normalization, before transfer.
         main = x if n == self.main_node_count else x.index_select(-1, self.main_joint_indices)
         main_mask = mask if n == self.main_node_count else mask.index_select(-1, self.main_joint_indices)

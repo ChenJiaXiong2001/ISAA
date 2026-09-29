@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import traceback
+from contextlib import nullcontext
 from functools import partial
 from pathlib import Path
 
@@ -20,7 +21,15 @@ from torch.utils.data import DataLoader, default_collate
 
 from isaa.data.rtmw_zip_dataset import RTMWZipDataset
 from isaa.data.rtmw_npy_dataset import RTMWNpyDataset
+from isaa.data.ntu_preprocessed_dataset import NTUPreprocessedDataset
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
+from isaa.models.body_local_fusion import BodyLocalFusion
+from isaa.models.original_ctrgcn import (
+    OriginalCTRGCN,
+    build_official_ntu_adjacency,
+    build_rtmw_adjacency_for_nodes,
+    build_rtmw32_auxiliary_adjacency,
+)
 from isaa.utils.console_logging import (
     estimate_eta,
     finish_progress_lines,
@@ -33,6 +42,18 @@ from isaa.utils.console_logging import (
 from isaa.utils.experiment import RunRecords, create_run_directory, ctrgcn_learning_rate
 from isaa.utils.seed import seed_everything
 from isaa.layouts import register_skeleton_presets
+from isaa.layouts.rtmw_133 import RTMW_32_NODE_INDICES
+
+
+# Only stages whose model/data contract is already implemented are exposed by
+# the entry point.  Keeping this list deliberately small prevents a stage name
+# from silently enabling several unfinished ISAA changes at once.
+_IMPLEMENTED_ABLATION_STAGES = {
+    "s00_original25": {"node_count": 25, "label": "original CTR-GCN, 25 RTMW nodes", "variant": "original", "feature": "raw", "local_graph": False},
+    "s01_original32": {"node_count": 32, "label": "original CTR-GCN, 32 RTMW nodes", "variant": "original", "feature": "raw", "local_graph": False},
+    "s02_localgraph32": {"node_count": 32, "label": "CTR-GCN with learnable topology constrained to RTMW32 graph edges", "variant": "original", "feature": "raw", "local_graph": True},
+    "s03_original32_aux": {"node_count": 32, "label": "original CTR-GCN, 32 learnable anchors plus anchor-only auxiliary nodes", "variant": "original_aux", "feature": "raw", "local_graph": False},
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,14 +62,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", choices=("xsub60", "xset60", "xsub120", "xset120"), default="xsub120")
     parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--npy-dir", default=None,
-                        help="Preprocessed root containing train/ and val/ data.npy + labels.npy")
+                        help="Preprocessed dataset root: official NTU train.npz/test.npz or legacy train/val NPY")
     parser.add_argument("--input-bn1d", action="store_true",
                         help="Use one ordinary nn.BatchNorm1d across 3x32 input channels")
-    parser.add_argument("--num-main-nodes", type=int, default=32,
-                        help="Number of RTMW region-center nodes used by the main branch")
+    parser.add_argument("--ablation-stage", choices=tuple(_IMPLEMENTED_ABLATION_STAGES), default=None,
+                        help=("Run one implemented single-change baseline stage. "
+                              "s00_original25 and s01_original32 differ only in node count; "
+                              "later stages are intentionally unavailable until implemented."))
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local"), default=None,
+                        help="isaa: existing model; original: CTR-GCN baseline; body-local: experimental 22+48 fusion")
+    parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
+                        help="Input features: ISAA relative xy/score or raw x/y/score")
+    parser.add_argument("--max-persons", type=int, default=2,
+                        help="Maximum person tracks kept by the RTMW loader")
+    parser.add_argument("--node-count", type=int, choices=(25, 32, 50, 71, 133), default=None,
+                        help="Progressive RTMW input size: 25 semantic, 32 centers, 50/71 expanded, or all 133")
+    parser.add_argument("--num-main-nodes", type=int, default=None,
+                        help="Backward-compatible alias for --node-count in ISAA main-only runs")
     parser.add_argument("--window-size", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--test-batch-size", type=int, default=64)
+    parser.add_argument("--grad-accum-steps", type=int, default=1,
+                        help="Gradient accumulation steps; keeps effective batch size when full RTMW baseline is memory-bound")
     parser.add_argument("--epochs", type=int, default=65)
     parser.add_argument("--main-only", action=argparse.BooleanOptionalAction, default=True,
                         help="Only 32 main nodes; --no-main-only restores the auxiliary experiment")
@@ -87,10 +122,68 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-dir", default=None, help="Parent directory; each run creates a unique subdirectory")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true", help="Synthetic forward check; no ZIP needed")
+    parser.add_argument("--console-only", action="store_true",
+                        help="Keep training output on the terminal without creating console.log")
     args = parser.parse_args()
+    if args.ablation_stage is not None:
+        stage = _IMPLEMENTED_ABLATION_STAGES[args.ablation_stage]
+        expected_nodes = int(stage["node_count"])
+        # Stage selection is an auditable preset.  A caller may still choose
+        # runtime/training settings (batch size, seed, device, ...), but may
+        # not combine the stage with a different model, feature path, or node
+        # mapping.  In particular, a conflicting explicit --feature-mode is
+        # rejected instead of being silently rewritten.
+        required_variant = stage["variant"]
+        required_feature = stage["feature"]
+        if args.model_variant not in (None, required_variant, "original" if required_variant == "original_aux" else required_variant):
+            parser.error(f"{args.ablation_stage} requires --model-variant {required_variant}")
+        if args.feature_mode not in (None, required_feature):
+            parser.error(f"{args.ablation_stage} requires --feature-mode {required_feature}")
+        if args.node_count not in (None, expected_nodes):
+            parser.error(
+                f"{args.ablation_stage} fixes --node-count {expected_nodes}; "
+                f"received {args.node_count}"
+            )
+        if args.num_main_nodes not in (None, expected_nodes):
+            parser.error(
+                f"{args.ablation_stage} fixes the node mapping at {expected_nodes}; "
+                f"--num-main-nodes {args.num_main_nodes} is incompatible"
+            )
+        args.model_variant = "original" if required_variant == "original_aux" else required_variant
+        args.feature_mode = required_feature
+        args.node_count = expected_nodes
+        args.main_only = required_variant == "isaa"
+    elif args.model_variant is None:
+        args.model_variant = "isaa"
     if args.num_classes is None:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
-    if min(args.num_classes, args.window_size, args.batch_size, args.test_batch_size, args.epochs, args.auxiliary_channels) < 1:
+    if args.node_count is None:
+        args.node_count = args.num_main_nodes
+    if args.model_variant == "body-local":
+        args.main_only = False
+        args.node_count = 133
+        args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
+        if args.feature_mode != "raw":
+            parser.error("--model-variant body-local requires raw x/y/score features")
+    elif args.model_variant == "original":
+        # The official model consumes all 133 RTMW joints and raw x/y/score.
+        args.main_only = False
+        args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
+        if args.feature_mode != "raw":
+            parser.error("--model-variant original requires --feature-mode raw")
+        args.node_count = 133 if args.node_count is None else args.node_count
+    else:
+        if args.feature_mode is None:
+            args.feature_mode = "isaa"
+        args.node_count = 32 if args.node_count is None else args.node_count
+        if args.node_count == 133 and args.main_only:
+            parser.error("ISAA main-only 模式的 node-count 只能是 25/32/50/71；133 请使用 --no-main-only")
+        if not args.main_only and args.node_count not in {32, 133}:
+            parser.error("ISAA 辅助分支当前只支持 32 节点主干；25/50/71 阶段请保持 --main-only")
+    args.num_main_nodes = args.node_count if args.node_count != 133 else 32
+    if min(args.num_classes, args.window_size, args.batch_size, args.test_batch_size,
+           args.epochs, args.auxiliary_channels, args.max_persons,
+           args.grad_accum_steps) < 1:
         parser.error("num-classes, window-size, batch-size, epochs and auxiliary-channels must be positive")
     if args.fine_start_epoch < 0:
         parser.error("fine-start-epoch must be >= 0")
@@ -110,11 +203,22 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def collate_rtmw(samples, *, main_indices=None):
-    """Select x/y/score in the worker, before DataLoader pins the batch."""
+def collate_rtmw(samples, *, main_indices=None, feature_mode="isaa"):
+    """Select model channels and optional main nodes in the worker."""
     features, labels, frame_mask = default_collate(samples)
-    features = features[:, [0, 1, 4]]
+    if feature_mode == "isaa":
+        features = features[:, [0, 1, 4]]
+    elif feature_mode != "raw":
+        raise ValueError(f"Unsupported feature_mode: {feature_mode!r}")
     if main_indices is not None:
+        features = features.index_select(3, main_indices)
+    return features.contiguous(), labels, frame_mask
+
+
+def collate_preprocessed(samples, *, main_indices=None):
+    """Collate fixed RTMW/NTU NPY features and optionally select nodes."""
+    features, labels, frame_mask = default_collate(samples)
+    if main_indices is not None and int(main_indices.max().item()) < features.shape[3]:
         features = features.index_select(3, main_indices)
     return features.contiguous(), labels, frame_mask
 
@@ -133,6 +237,7 @@ def run_epoch(
     stage_started_at = time.perf_counter()
     run_started_at = progress_context.get("run_started_at", stage_started_at)
     total_units = max(progress_context.get("total_units", total_steps), 1)
+    grad_accum_steps = max(1, int(progress_context.get("grad_accum_steps", 1)))
     completed_before = progress_context.get("completed_before", 0)
     last_refresh = stage_started_at
     batch_fetch_started = stage_started_at
@@ -151,15 +256,18 @@ def run_epoch(
                 x = x.to(device, non_blocking=non_blocking)
                 labels = labels.to(device, non_blocking=non_blocking)
                 frame_mask = frame_mask.to(device, non_blocking=non_blocking)
-                if training:
+                if training and (step - 1) % grad_accum_steps == 0:
                     optimizer.zero_grad(set_to_none=True)
                 logits = model(x, frame_mask)
                 loss = criterion(logits, labels)
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite loss at batch {step}")
                 if training:
-                    loss.backward()
-                    optimizer.step()
+                    group_size = min(grad_accum_steps,
+                                     total_steps - ((step - 1) // grad_accum_steps) * grad_accum_steps)
+                    (loss / group_size).backward()
+                    if step % grad_accum_steps == 0 or step == total_steps:
+                        optimizer.step()
                 count = labels.size(0)
                 # Keep metrics on device until epoch end. Preserve the fail-fast loss check above.
                 with torch.no_grad():
@@ -219,7 +327,14 @@ def run_epoch(
 
 def main() -> None:
     args = parse_args()
-    variant = f"rtmw_ctr{args.num_main_nodes}_only_v5" if args.main_only else RTMWLocalCTR.ARCHITECTURE
+    if args.model_variant == "body-local":
+        variant = BodyLocalFusion.ARCHITECTURE
+    elif args.model_variant == "original":
+        variant = f"{OriginalCTRGCN.ARCHITECTURE}_n{args.node_count}"
+        if args.ablation_stage == "s03_original32_aux":
+            variant += "_anchor_aux"
+    else:
+        variant = f"rtmw_ctr{args.num_main_nodes}_only_v5" if args.main_only else RTMWLocalCTR.ARCHITECTURE
     if args.input_bn1d:
         variant += "_inputbn1d"
     base = (Path(args.save_dir) if args.save_dir else
@@ -227,7 +342,8 @@ def main() -> None:
     if not base.is_absolute():
         base = PROJECT_ROOT / base
     save_dir = create_run_directory(base)
-    with mirror_console_to_file(save_dir / "console.log"):
+    log_context = nullcontext() if args.console_only else mirror_console_to_file(save_dir / "console.log")
+    with log_context:
         records = RunRecords(save_dir, vars(args), PROJECT_ROOT)
         try:
             _run(args, save_dir, records)
@@ -265,35 +381,111 @@ def _run(args, save_dir, records) -> None:
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
-    model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels,
-                         backbone_width=args.backbone_width, main_only=args.main_only,
-                         native_bn=args.native_bn,
-                         input_norm="bn1d" if args.input_bn1d else "point_bn2d",
-                         main_node_count=args.num_main_nodes).to(device)
-    model.set_fine_enabled(not args.main_only and args.fine_start_epoch == 0)
-    model_config = {"backbone_width": model.backbone_width, "channels": model.channels,
-                    "auxiliary_channels": args.auxiliary_channels, "num_classes": args.num_classes,
-                    "main_only": args.main_only, "native_bn": model.native_bn,
-                    "input_norm": model.input_norm_type, "main_node_count": model.main_node_count}
+    if args.model_variant == "body-local":
+        model = BodyLocalFusion(num_classes=args.num_classes).to(device)
+        model_config = {"variant": "body-local", "num_classes": args.num_classes,
+                        "body_indices": list(model.BODY_INDICES), "hand_indices": list(model.HAND_INDICES),
+                        "face_tokens": 6, "local_nodes": 48,
+                        "body_channels": model.CHANNELS, "local_channels": model.LOCAL_CHANNELS}
+    elif args.model_variant == "original":
+        aux_stage = args.ablation_stage == "s03_original32_aux"
+        data_root = Path(args.npy_dir) if args.npy_dir else None
+        official_preprocessed = bool(
+            data_root is not None and (
+                (data_root / "train_data.npy").is_file()
+                or (data_root / "train.npz").is_file()
+            )
+        )
+        if aux_stage:
+            original_graph = build_rtmw32_auxiliary_adjacency()
+            original_indices = tuple(range(133))
+            model_nodes = 133
+            local_graph = True
+            learnable_graph_nodes = tuple(RTMW_32_NODE_INDICES)
+        elif official_preprocessed and args.node_count == 25:
+            original_graph = build_official_ntu_adjacency()
+            original_indices = tuple(range(25))
+            model_nodes = 25
+            local_graph = False
+            learnable_graph_nodes = None
+        else:
+            original_graph, original_indices = build_rtmw_adjacency_for_nodes(args.node_count)
+            model_nodes = args.node_count
+            local_graph = bool(_IMPLEMENTED_ABLATION_STAGES.get(args.ablation_stage or "", {}).get("local_graph", False))
+            learnable_graph_nodes = None
+        model = OriginalCTRGCN(
+            num_classes=args.num_classes,
+            num_point=model_nodes,
+            num_person=args.max_persons,
+            graph=original_graph,
+            local_graph=local_graph,
+            learnable_graph_nodes=learnable_graph_nodes,
+        ).to(device)
+        model_config = {"variant": "original", "num_classes": args.num_classes,
+                        "num_point": model_nodes, "num_person": args.max_persons,
+                        "input_channels": 3, "graph": "official_rtmw_regional_induced",
+                        "node_indices": list(original_indices),
+                        "ablation_stage": args.ablation_stage}
+    else:
+        model = RTMWLocalCTR(num_classes=args.num_classes, auxiliary_channels=args.auxiliary_channels,
+                             backbone_width=args.backbone_width, main_only=args.main_only,
+                             native_bn=args.native_bn,
+                             input_norm="bn1d" if args.input_bn1d else "point_bn2d",
+                             main_node_count=args.num_main_nodes).to(device)
+        model.set_fine_enabled(not args.main_only and args.fine_start_epoch == 0)
+        model_config = {"variant": "isaa", "backbone_width": model.backbone_width,
+                        "channels": model.channels, "auxiliary_channels": args.auxiliary_channels,
+                        "num_classes": args.num_classes, "main_only": args.main_only,
+                        "native_bn": model.native_bn, "input_norm": model.input_norm_type,
+                        "main_node_count": model.main_node_count,
+                        "node_indices": model.main_joint_indices.cpu().tolist()}
+    reference = {
+        "repository": "https://github.com/Uason-Chen/CTR-GCN",
+        "commit": "67d8710578b842a5d6384cd8293d627f03c6ddc1",
+        "config": ("config/rtmw133/default.yaml" if args.model_variant == "original" else
+                   ("config/nturgbd120-cross-set/default.yaml" if args.split == "xset120"
+                    else "config/nturgbd120-cross-subject/default.yaml")),
+        "schedule": "main.py:adjust_learning_rate (zero-based milestones)",
+        "adaptation": ("experimental body22 CTR-GCN + hand42/face6 ST-GCN, normalized features, pre-classifier fusion"
+                       if args.model_variant == "body-local" else
+                       (f"official RTMW induced {args.node_count}-node graph, raw x/y/score, ordinary BN, no masks"
+                        if args.model_variant == "original" else
+                        "RTMW relative xy/score, masks, 32 joints; existing crop/pad preprocessing")),
+    }
     records.update_config(args=vars(args), model_config=model_config, architecture=model.ARCHITECTURE,
                           optimizer={"name": "SGD", "base_lr": args.lr, "momentum": args.momentum,
-                                     "nesterov": args.nesterov, "weight_decay": args.weight_decay},
-                          main_joint_indices=model.main_joint_indices.cpu().tolist(),
+                                     "nesterov": args.nesterov, "weight_decay": args.weight_decay,
+                                     "grad_accum_steps": args.grad_accum_steps,
+                                     "effective_batch_size": args.batch_size * args.grad_accum_steps},
+                          main_joint_indices=(model.main_joint_indices.cpu().tolist()
+                                              if hasattr(model, "main_joint_indices") else None),
                           runtime={"torch": torch.__version__, "cuda": torch.version.cuda,
                                    "device": str(device), "gpu": torch.cuda.get_device_name(device)
                                    if device.type == "cuda" else None,
                                    "cudnn": cudnn_version,
                                    "cudnn_enabled": torch.backends.cudnn.enabled},
-                          preprocessing={"channels": ["relative_x", "relative_y", "score"],
+                          reference=reference,
+                          preprocessing={"channels": (["x", "y", "score"] if args.feature_mode == "raw"
+                                                     else ["relative_x", "relative_y", "score"]),
                                          "crop": ("precomputed fixed window" if args.npy_dir else
                                                   "random fixed window / center validation, pad short clips"),
                                          "augmentation": {"random_temporal_crop": not bool(args.npy_dir)}})
-    print(f"ISAA {model.experiment_name} backbone=ctr_gcn_{args.num_main_nodes} auxiliary={'off' if args.main_only else 'fixed_71'} "
-          f"channels={model.channels} "
-          f"auxiliary_channels={args.auxiliary_channels} bn={'native' if model.native_bn else 'masked'} "
-          f"input_norm={model.input_norm_type} device={device} "
-          f"parameters={sum(p.numel() for p in model.parameters()):,}",
-          flush=True)
+    if args.model_variant == "original":
+        print(f"Original CTR-GCN RTMW{args.node_count} points={args.max_persons} device={device} "
+              f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
+        if args.ablation_stage is not None:
+            stage_label = _IMPLEMENTED_ABLATION_STAGES.get(args.ablation_stage or "", {}).get("label")
+            print(f"ablation_stage: {args.ablation_stage}"
+                  + (f" ({stage_label})" if stage_label else ""), flush=True)
+    elif args.model_variant == "body-local":
+        print(f"BodyLocalFusion RTMW body22+hand42+face6 device={device} "
+              f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    else:
+        print(f"ISAA {model.experiment_name} backbone=ctr_gcn_{args.num_main_nodes} auxiliary={'off' if args.main_only else 'fixed_71'} "
+              f"channels={model.channels} "
+              f"auxiliary_channels={args.auxiliary_channels} bn={'native' if model.native_bn else 'masked'} "
+              f"input_norm={model.input_norm_type} device={device} "
+              f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     print(f"optimizer: SGD lr={args.lr} momentum={args.momentum} nesterov={args.nesterov} "
           f"weight_decay={args.weight_decay} warmup={args.warmup_epochs} "
           f"steps_zero_based={args.lr_steps} decay={args.lr_decay} epochs={args.epochs}", flush=True)
@@ -302,21 +494,35 @@ def _run(args, save_dir, records) -> None:
         print(f"runtime: gpu={torch.cuda.get_device_name(device)} tf32={args.tf32} "
               f"cudnn={args.cudnn} cudnn_benchmark={args.cudnn}",
               flush=True)
-    print(f"runtime: batch_size={args.batch_size} num_workers={args.num_workers} "
+    print(f"runtime: batch_size={args.batch_size} grad_accum_steps={args.grad_accum_steps} "
+          f"effective_batch_size={args.batch_size * args.grad_accum_steps} num_workers={args.num_workers} "
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "
           f"prefetch_factor={args.prefetch_factor if args.num_workers > 0 else None}", flush=True)
     if args.dry_run:
-        x = torch.randn(2, 3, args.window_size, 133, 2, device=device)
+        people = args.max_persons if args.model_variant in {"original", "body-local"} else 2
+        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local"} else (
+            args.node_count if args.main_only else 133
+        )
+        x = torch.randn(2, 3, args.window_size, synthetic_nodes, people, device=device)
         x[:, 2] = 1
-        if args.main_only:
+        if args.main_only and synthetic_nodes == 133:
             x = x.index_select(3, model.main_joint_indices)
         model.eval()
         with torch.no_grad():
-            result = model(x, return_node_features=True)
-        print(f"input={tuple(x.shape)} logits={tuple(result['logits'].shape)} "
-              f"main_features={tuple(result['node_features'].shape)} "
-              f"auxiliary_features={None if result['auxiliary_node_features'] is None else tuple(result['auxiliary_node_features'].shape)} "
-              f"finite={torch.isfinite(result['logits']).all().item()}")
+            if args.model_variant == "original":
+                logits = model(x)
+                print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
+                      f"finite={torch.isfinite(logits).all().item()}")
+            elif args.model_variant == "body-local":
+                logits = model(x)
+                print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
+                      f"finite={torch.isfinite(logits).all().item()}")
+            else:
+                result = model(x, return_node_features=True)
+                print(f"input={tuple(x.shape)} logits={tuple(result['logits'].shape)} "
+                      f"main_features={tuple(result['node_features'].shape)} "
+                      f"auxiliary_features={None if result['auxiliary_node_features'] is None else tuple(result['auxiliary_node_features'].shape)} "
+                      f"finite={torch.isfinite(result['logits']).all().item()}")
         return
 
     compile_enabled = args.compile if args.compile is not None else device.type == "cuda"
@@ -333,20 +539,50 @@ def _run(args, save_dir, records) -> None:
         archive = PROJECT_ROOT / archive
     loaders = {}
     dataset_info = {}
-    collate = (default_collate if args.npy_dir else
-               partial(collate_rtmw, main_indices=model.main_joint_indices.cpu() if args.main_only else None))
+    if args.npy_dir:
+        if args.model_variant in {"original", "body-local"}:
+            npy_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
+        elif args.main_only:
+            npy_indices = model.main_joint_indices.cpu()
+        else:
+            npy_indices = None
+        collate = partial(collate_preprocessed, main_indices=npy_indices)
+    else:
+        if args.model_variant in {"original", "body-local"}:
+            main_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
+        else:
+            main_indices = model.main_joint_indices.cpu() if args.main_only else None
+        collate = partial(collate_rtmw, main_indices=main_indices,
+                          feature_mode=args.feature_mode)
     for split in ("train", "val"):
         if args.npy_dir:
-            dataset = RTMWNpyDataset(Path(args.npy_dir) / split, max_samples=args.max_samples)
-            if dataset.data.shape[2] != args.window_size:
-                raise ValueError(
-                    f"预处理窗口 T={dataset.data.shape[2]} 与 --window-size={args.window_size} 不一致"
+            root = Path(args.npy_dir)
+            dataset_nodes = 133 if args.ablation_stage == "s03_original32_aux" else args.node_count
+            official_path = root / ("train.npz" if split == "train" else "test.npz")
+            ctrgcn_path = root / ("train_data.npy" if split == "train" else "val_data.npy")
+            if official_path.is_file():
+                dataset = NTUPreprocessedDataset(
+                    official_path, max_samples=args.max_samples, expected_nodes=dataset_nodes,
+                    window_size=args.window_size,
                 )
+            elif ctrgcn_path.is_file():
+                dataset = NTUPreprocessedDataset(
+                    ctrgcn_path, max_samples=args.max_samples, expected_nodes=dataset_nodes,
+                    window_size=args.window_size,
+                )
+            else:
+                # Legacy ISAA NPY cache remains available for non-official RTMW runs.
+                dataset = RTMWNpyDataset(root / split, max_samples=args.max_samples)
+                if dataset.data.shape[2] != args.window_size:
+                    raise ValueError(
+                        f"预处理窗口 T={dataset.data.shape[2]} 与 --window-size={args.window_size} 不一致"
+                    )
         else:
             dataset = RTMWZipDataset(
                 archive, split=split, split_protocol=args.split,
                 window_size=args.window_size, num_joints=133, num_classes=args.num_classes,
-                layout="rtmw_133", max_persons=2, max_samples=args.max_samples,
+                layout="rtmw_133", max_persons=args.max_persons,
+                feature_mode=args.feature_mode, max_samples=args.max_samples,
                 augment=split == "train", augmentation_config={"random_temporal_crop": True},
             )
         loaders[split] = DataLoader(
@@ -363,7 +599,12 @@ def _run(args, save_dir, records) -> None:
         print(f"{split}: {len(dataset)} samples ({args.split})", flush=True)
 
     if args.npy_dir:
-        records.update_config(dataset=dataset_info, dataset_format="npy_memmap", npy_dir=str(Path(args.npy_dir).resolve()))
+        has_official_npz = any((Path(args.npy_dir) / name).is_file() for name in ("train.npz", "test.npz"))
+        records.update_config(
+            dataset=dataset_info,
+            dataset_format="official_ntu_npz" if has_official_npz else "npy_memmap",
+            npy_dir=str(Path(args.npy_dir).resolve()),
+        )
     else:
         records.update_config(dataset=dataset_info, archive=str(archive.resolve()),
                               archive_bytes=archive.stat().st_size, archive_mtime_ns=archive.stat().st_mtime_ns)
@@ -376,7 +617,8 @@ def _run(args, save_dir, records) -> None:
     steps_per_epoch = train_steps + len(loaders["val"])
     total_run_steps = steps_per_epoch * args.epochs
     for epoch in range(1, args.epochs + 1):
-        model.set_fine_enabled(not args.main_only and epoch > args.fine_start_epoch)
+        if args.model_variant == "isaa":
+            model.set_fine_enabled(not args.main_only and epoch > args.fine_start_epoch)
         learning_rate = ctrgcn_learning_rate(epoch - 1, args.lr, args.warmup_epochs,
                                             args.lr_steps, args.lr_decay)
         for group in optimizer.param_groups:
@@ -386,9 +628,15 @@ def _run(args, save_dir, records) -> None:
             "run_started_at": training_started_at,
             "total_units": total_run_steps,
             "completed_before": completed_before,
+            "grad_accum_steps": args.grad_accum_steps,
         }
         finish_progress_lines()
-        stage = "ctr32+aux71" if model.fine_enabled else "ctr32_only"
+        if args.model_variant == "original":
+            stage = args.ablation_stage or "original_ctrgcn"
+        elif args.model_variant == "body-local":
+            stage = "body22_ctr+hands42_face6_stgcn"
+        else:
+            stage = "ctr32+aux71" if model.fine_enabled else "ctr32_only"
         print(f"Training epoch: {epoch}/{args.epochs} stage={stage} "
               f"lr={optimizer.param_groups[0]['lr']:.8g}", flush=True)
         train_metrics = run_epoch(

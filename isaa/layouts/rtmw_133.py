@@ -18,6 +18,54 @@ RTMW_133_NUM_SEGMENTS = 16
 RTMW_133_PATTERN_DIM = 256
 RTMW_133_BLOCK_CHANNELS = (64, 64, 64, 96, 128, 128, 128, 192, 256, 256)
 
+# Stable node orders used by the progressive RTMW experiments.  The 25-node
+# order follows the 25 semantic anchors used by the original CTR-GCN
+# regional graph.  Repeated indices are intentional: RTMW has fewer physical
+# anchors for a few NTU semantic joints, so the same observed point is exposed
+# at each corresponding semantic position.  The 32-node order keeps one
+# representative center for every RTMW region.
+RTMW_25_NODE_INDICES = (
+    11, 11, 5, 0, 5, 7, 9, 9, 6, 8, 10, 10, 11,
+    13, 15, 17, 12, 14, 16, 20, 5, 103, 95, 124, 116,
+)
+RTMW_32_NODE_INDICES = (
+    0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 56, 91, 95, 99, 103, 107,
+    111, 112, 116, 120, 124, 128, 132,
+)
+
+
+def _expand_rtmw_nodes(target: int) -> tuple[int, ...]:
+    """Deterministically extend the 32-node centers for coarse-to-fine runs."""
+    base = list(RTMW_32_NODE_INDICES)
+    used = set(base)
+    for index in range(RTMW_133_NUM_JOINTS):
+        if index not in used:
+            base.append(index)
+        if len(base) >= target:
+            break
+    return tuple(base[:target])
+
+
+def get_rtmw_node_indices(node_count: int) -> tuple[int, ...]:
+    """Return the canonical RTMW node order for a training stage.
+
+    ``25`` and ``32`` are the two progressive coarse-to-fine stages.  ``133``
+    preserves the complete RTMW observation.  Keeping this mapping in the
+    layout module ensures the ZIP loader, preprocessing tool and both model
+    variants use exactly the same node order.
+    """
+    node_count = int(node_count)
+    if node_count == 25:
+        return RTMW_25_NODE_INDICES
+    if node_count == 32:
+        return RTMW_32_NODE_INDICES
+    if node_count in {50, 71}:
+        return _expand_rtmw_nodes(node_count)
+    if node_count == 133:
+        return tuple(range(RTMW_133_NUM_JOINTS))
+    raise ValueError("RTMW node_count 只支持 25、32、50、71 或 133")
+
 
 RTMW_133_REGION_SPECS = (
     RegionSpec("头部区域", (0, 1, 2, 3, 4), "鼻、双眼、双耳聚合头部点"),
