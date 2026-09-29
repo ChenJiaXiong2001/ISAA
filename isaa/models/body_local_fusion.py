@@ -224,8 +224,8 @@ class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
         fused = torso + alpha_hand.unsqueeze(-1) * hand + alpha_face.unsqueeze(-1) * face
         valid = body_valid | hand_valid | face_valid
         fused = fused * valid.unsqueeze(-1).to(fused.dtype)
-        fused = fused.reshape(b, m, t, self.FUSION_WIDTH).mean(1)
-        valid = valid.reshape(b, m, t).any(1)
+        fused = fused.reshape(b, m, target_t, self.FUSION_WIDTH).mean(1)
+        valid = valid.reshape(b, m, target_t).any(1)
         pooled = (fused * valid.unsqueeze(-1)).sum(1) / valid.sum(1, keepdim=True).clamp_min(1)
         return self.classifier(pooled)
 
