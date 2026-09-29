@@ -136,3 +136,96 @@ class BodyLocalFullFusion(BodyLocalFusion):
     LOCAL_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
     LOCAL_STRIDES = (4, 7)
 
+
+class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
+    """Per-frame torso-query attention with independent hand/face gates."""
+
+    ARCHITECTURE = "rtmw_torso_centered_hand_face_cross_attention_v1"
+    FUSION_WIDTH = 96
+
+    def __init__(self, num_classes: int = 120):
+        super().__init__(num_classes=num_classes)
+        self.body_projection = nn.Linear(self.CHANNELS[-1], self.FUSION_WIDTH)
+        self.hand_projection = nn.Linear(self.LOCAL_CHANNELS[-1], self.FUSION_WIDTH)
+        self.face_projection = nn.Linear(self.LOCAL_CHANNELS[-1], self.FUSION_WIDTH)
+        self.torso_query_hand = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.hand_key = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.torso_query_face = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.face_key = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.hand_gate_bias = nn.Parameter(torch.zeros(()))
+        self.face_gate_bias = nn.Parameter(torch.zeros(()))
+        self.classifier = nn.Linear(self.FUSION_WIDTH, num_classes)
+
+    @staticmethod
+    def _pool_nodes_per_frame(x, mask):
+        # x [B,C,T,V], mask [B,1,T,V] -> [B,T,C], valid [B,T]
+        w = mask.to(x.dtype)
+        count = w.sum(-1).squeeze(1)
+        feat = (x * w).sum(-1).transpose(1, 2) / count.unsqueeze(-1).clamp_min(1)
+        return feat, count > 0
+
+    def forward(self, x, valid_frame_mask=None):
+        if x.ndim == 4:
+            x = x.unsqueeze(-1)
+        if x.ndim != 5 or x.shape[1] != 3 or x.shape[3] != 133:
+            raise ValueError("Expected B x 3 x T x 133 x M RTMW input")
+        b, c, t, _, m = x.shape
+        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(1, keepdim=True)
+        if valid_frame_mask is not None:
+            mask &= valid_frame_mask[:, None, :, None, None].bool()
+        x = x.permute(0, 4, 1, 2, 3).reshape(b*m, c, t, 133)
+        mask = mask.permute(0, 4, 1, 2, 3).reshape(b*m, 1, t, 133)
+        x = x.masked_fill(~mask, 0)
+
+        body = x.index_select(-1, self.body_indices)
+        bm = mask.index_select(-1, self.body_indices)
+        norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
+            b*m, 3*len(self.BODY_INDICES), t, 1)
+        body = self.body_input_norm(body.permute(0, 1, 3, 2).reshape(
+            b*m, 3*len(self.BODY_INDICES), t, 1), norm_mask)
+        body = body.reshape(b*m, 3, len(self.BODY_INDICES), t).permute(0, 1, 3, 2)
+        for block in self.body_blocks:
+            body, bm = block(body, bm)
+
+        hands = x.index_select(-1, torch.tensor(self.HAND_INDICES, device=x.device))
+        hm = mask.index_select(-1, torch.tensor(self.HAND_INDICES, device=x.device))
+        fidx = self.face_indices.flatten().to(x.device)
+        fx = x.index_select(-1, fidx).reshape(b*m, 3, t, 6, 12)
+        fm = mask.index_select(-1, fidx).reshape(b*m, 1, t, 6, 12)
+        fm = fm & self.face_members.to(x.device)[None, None, None]
+        fc = fm.sum(-1)
+        face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
+        local = torch.cat((hands, face), -1)
+        lm = torch.cat((hm, fc > 0), -1)
+        for block in self.local_blocks:
+            local, lm = block(local, lm)
+
+        body_t, body_valid = self._pool_nodes_per_frame(body, bm)
+        hand_t, hand_valid = self._pool_nodes_per_frame(local[..., :42], lm[..., :42])
+        face_t, face_valid = self._pool_nodes_per_frame(local[..., 42:], lm[..., 42:])
+        target_t = body_t.shape[1]
+        if hand_t.shape[1] != target_t:
+            hand_t = F.interpolate(hand_t.transpose(1, 2), size=target_t, mode="linear",
+                                   align_corners=False).transpose(1, 2)
+            hand_valid = F.interpolate(hand_valid[:, None].float(), size=target_t,
+                                       mode="nearest")[:, 0].bool()
+        if face_t.shape[1] != target_t:
+            face_t = F.interpolate(face_t.transpose(1, 2), size=target_t, mode="linear",
+                                   align_corners=False).transpose(1, 2)
+            face_valid = F.interpolate(face_valid[:, None].float(), size=target_t,
+                                       mode="nearest")[:, 0].bool()
+        torso = self.body_projection(body_t)
+        hand = self.hand_projection(hand_t)
+        face = self.face_projection(face_t)
+        hand_score = (self.torso_query_hand(torso) * self.hand_key(hand)).sum(-1) / self.FUSION_WIDTH**0.5
+        face_score = (self.torso_query_face(torso) * self.face_key(face)).sum(-1) / self.FUSION_WIDTH**0.5
+        alpha_hand = torch.sigmoid(hand_score + self.hand_gate_bias) * hand_valid.to(hand.dtype)
+        alpha_face = torch.sigmoid(face_score + self.face_gate_bias) * face_valid.to(face.dtype)
+        fused = torso + alpha_hand.unsqueeze(-1) * hand + alpha_face.unsqueeze(-1) * face
+        valid = body_valid | hand_valid | face_valid
+        fused = fused * valid.unsqueeze(-1).to(fused.dtype)
+        fused = fused.reshape(b, m, t, self.FUSION_WIDTH).mean(1)
+        valid = valid.reshape(b, m, t).any(1)
+        pooled = (fused * valid.unsqueeze(-1)).sum(1) / valid.sum(1, keepdim=True).clamp_min(1)
+        return self.classifier(pooled)
+
