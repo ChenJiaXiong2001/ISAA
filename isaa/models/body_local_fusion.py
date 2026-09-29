@@ -148,12 +148,15 @@ class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
         self.body_projection = nn.Linear(self.CHANNELS[-1], self.FUSION_WIDTH)
         self.hand_projection = nn.Linear(self.LOCAL_CHANNELS[-1], self.FUSION_WIDTH)
         self.face_projection = nn.Linear(self.LOCAL_CHANNELS[-1], self.FUSION_WIDTH)
+        self.torso_norm = nn.LayerNorm(self.FUSION_WIDTH)
+        self.hand_norm = nn.LayerNorm(self.FUSION_WIDTH)
+        self.face_norm = nn.LayerNorm(self.FUSION_WIDTH)
         self.torso_query_hand = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
         self.hand_key = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
         self.torso_query_face = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
         self.face_key = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
-        self.hand_gate_bias = nn.Parameter(torch.zeros(()))
-        self.face_gate_bias = nn.Parameter(torch.zeros(()))
+        self.hand_gate_bias = nn.Parameter(torch.tensor(-2.0))
+        self.face_gate_bias = nn.Parameter(torch.tensor(-2.0))
         self.classifier = nn.Linear(self.FUSION_WIDTH, num_classes)
 
     @staticmethod
@@ -214,9 +217,9 @@ class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
                                    align_corners=False).transpose(1, 2)
             face_valid = F.interpolate(face_valid[:, None].float(), size=target_t,
                                        mode="nearest")[:, 0].bool()
-        torso = self.body_projection(body_t)
-        hand = self.hand_projection(hand_t)
-        face = self.face_projection(face_t)
+        torso = self.torso_norm(self.body_projection(body_t))
+        hand = self.hand_norm(self.hand_projection(hand_t))
+        face = self.face_norm(self.face_projection(face_t))
         hand_score = (self.torso_query_hand(torso) * self.hand_key(hand)).sum(-1) / self.FUSION_WIDTH**0.5
         face_score = (self.torso_query_face(torso) * self.face_key(face)).sum(-1) / self.FUSION_WIDTH**0.5
         alpha_hand = torch.sigmoid(hand_score + self.hand_gate_bias) * hand_valid.to(hand.dtype)
