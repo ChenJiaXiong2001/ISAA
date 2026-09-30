@@ -142,6 +142,10 @@ class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
 
     ARCHITECTURE = "rtmw_torso_centered_hand_face_cross_attention_v1"
     FUSION_WIDTH = 96
+    # Keep the torso CTR-GCN branch at its baseline width, while using the
+    # full 10-layer ST-GCN stack for the hand and six face-token branch.
+    LOCAL_CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
+    LOCAL_STRIDES = (4, 7)
 
     def __init__(self, num_classes: int = 120):
         super().__init__(num_classes=num_classes)
