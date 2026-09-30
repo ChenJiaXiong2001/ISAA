@@ -25,6 +25,7 @@ from isaa.data.ntu_preprocessed_dataset import NTUPreprocessedDataset
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
 from isaa.models.body_local_fusion import (
     BodyLocalFusion, BodyLocalFullFusion, TorsoCenteredCrossBranchFusion,
+    OfficialTorsoCenteredCrossBranchFusion,
 )
 from isaa.models.original_ctrgcn import (
     OriginalCTRGCN,
@@ -71,8 +72,8 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-full", "torso-cross-attn"), default=None,
-                        help="isaa/original baselines; body-local light baseline; body-local-full full ST-GCN; torso-cross-attn adds torso-centered hand/face fusion")
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
+                        help="isaa/original baselines; body-local variants; torso-cross-attn-official uses reference CTR-GCN/ST-GCN backbones")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
     parser.add_argument("--max-persons", type=int, default=2,
@@ -161,12 +162,12 @@ def parse_args() -> argparse.Namespace:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if args.node_count is None:
         args.node_count = args.num_main_nodes
-    if args.model_variant in {"body-local", "body-local-full", "torso-cross-attn"}:
+    if args.model_variant in {"body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
         args.main_only = False
         args.node_count = 133
         args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
         if args.feature_mode != "raw":
-            parser.error("body-local/body-local-full/torso-cross-attn require raw x/y/score features")
+            parser.error("body-local variants require raw x/y/score features")
     elif args.model_variant == "original":
         # The official model consumes all 133 RTMW joints and raw x/y/score.
         args.main_only = False
@@ -335,6 +336,8 @@ def main() -> None:
         variant = BodyLocalFullFusion.ARCHITECTURE
     elif args.model_variant == "torso-cross-attn":
         variant = TorsoCenteredCrossBranchFusion.ARCHITECTURE
+    elif args.model_variant == "torso-cross-attn-official":
+        variant = OfficialTorsoCenteredCrossBranchFusion.ARCHITECTURE
     elif args.model_variant == "original":
         variant = f"{OriginalCTRGCN.ARCHITECTURE}_n{args.node_count}"
         if args.ablation_stage == "s03_original32_aux":
@@ -406,6 +409,14 @@ def _run(args, save_dir, records) -> None:
                         "face_tokens": 6, "body_channels": model.CHANNELS,
                         "local_channels": model.LOCAL_CHANNELS,
                         "fusion": "per-frame torso-query; independent hand/face sigmoid gates"}
+    elif args.model_variant == "torso-cross-attn-official":
+        model = OfficialTorsoCenteredCrossBranchFusion(num_classes=args.num_classes).to(device)
+        model_config = {"variant": "torso-cross-attn-official", "num_classes": args.num_classes,
+                        "body_indices": list(model.BODY_INDICES), "hand_indices": list(model.HAND_INDICES),
+                        "face_tokens": 6,
+                        "body_backbone": "official CTR-GCN ten-block feature extractor",
+                        "local_backbone": "official ST-GCN ten-block feature extractor",
+                        "fusion": "per-frame torso-query; independent hand/face sigmoid gates"}
     elif args.model_variant == "original":
         aux_stage = args.ablation_stage == "s03_original32_aux"
         data_root = Path(args.npy_dir) if args.npy_dir else None
@@ -466,7 +477,7 @@ def _run(args, save_dir, records) -> None:
                     else "config/nturgbd120-cross-subject/default.yaml")),
         "schedule": "main.py:adjust_learning_rate (zero-based milestones)",
         "adaptation": ("experimental body22 CTR-GCN + hand42/face6 ST-GCN, normalized features, pre-classifier fusion"
-                       if args.model_variant in {"body-local", "body-local-full", "torso-cross-attn"} else
+                       if args.model_variant in {"body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
                        (f"official RTMW induced {args.node_count}-node graph, raw x/y/score, ordinary BN, no masks"
                         if args.model_variant == "original" else
                         "RTMW relative xy/score, masks, 32 joints; existing crop/pad preprocessing")),
@@ -505,6 +516,9 @@ def _run(args, save_dir, records) -> None:
     elif args.model_variant == "torso-cross-attn":
         print(f"TorsoCenteredCrossBranchFusion RTMW body22+hand42+face6 device={device} "
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    elif args.model_variant == "torso-cross-attn-official":
+        print(f"OfficialTorsoCenteredCrossBranchFusion RTMW body22+hand42+face6 device={device} "
+              f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     else:
         print(f"ISAA {model.experiment_name} backbone=ctr_gcn_{args.num_main_nodes} auxiliary={'off' if args.main_only else 'fixed_71'} "
               f"channels={model.channels} "
@@ -524,8 +538,8 @@ def _run(args, save_dir, records) -> None:
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "
           f"prefetch_factor={args.prefetch_factor if args.num_workers > 0 else None}", flush=True)
     if args.dry_run:
-        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn"} else 2
-        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn"} else (
+        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
+        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
             args.node_count if args.main_only else 133
         )
         x = torch.randn(2, 3, args.window_size, synthetic_nodes, people, device=device)
@@ -538,7 +552,7 @@ def _run(args, save_dir, records) -> None:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
-            elif args.model_variant in {"body-local", "body-local-full", "torso-cross-attn"}:
+            elif args.model_variant in {"body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
@@ -565,7 +579,7 @@ def _run(args, save_dir, records) -> None:
     loaders = {}
     dataset_info = {}
     if args.npy_dir:
-        if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn"}:
+        if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             npy_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         elif args.main_only:
             npy_indices = model.main_joint_indices.cpu()
@@ -573,7 +587,7 @@ def _run(args, save_dir, records) -> None:
             npy_indices = None
         collate = partial(collate_preprocessed, main_indices=npy_indices)
     else:
-        if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn"}:
+        if args.model_variant in {"original", "body-local", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             main_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         else:
             main_indices = model.main_joint_indices.cpu() if args.main_only else None
@@ -664,6 +678,8 @@ def _run(args, save_dir, records) -> None:
             stage = "body22_ctr+hands42_face6_stgcn_full"
         elif args.model_variant == "torso-cross-attn":
             stage = "body22_ctr+hand_face_torso_centered_cross_attn"
+        elif args.model_variant == "torso-cross-attn-official":
+            stage = "official_ctr_body22+official_stgcn_hand_face_torso_centered_cross_attn"
         else:
             stage = "ctr32+aux71" if model.fine_enabled else "ctr32_only"
         print(f"Training epoch: {epoch}/{args.epochs} stage={stage} "

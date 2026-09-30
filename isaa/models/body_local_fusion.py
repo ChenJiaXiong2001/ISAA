@@ -6,6 +6,8 @@ features only immediately before classification.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -13,6 +15,8 @@ from torch.nn import functional as F
 from isaa.graph.adjacency import build_joint_spatial_partitions, build_joint_adjacency
 from isaa.graph.regions import build_region_partition
 from isaa.layouts.rtmw_133 import RTMW_32_NODE_INDICES
+from isaa.models.original_ctrgcn import TCNGCNUnit, build_official_rtmw_adjacency
+from isaa.models.official_stgcn import OfficialSTGCNFeatureExtractor
 from isaa.models.rtmw_local_ctr import CTRGCNBlock, FaceTokenCompression, PointBatchNorm
 
 
@@ -226,6 +230,169 @@ class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
         face = self.face_norm(self.face_projection(face_t))
         hand_score = (self.torso_query_hand(torso) * self.hand_key(hand)).sum(-1) / self.FUSION_WIDTH**0.5
         face_score = (self.torso_query_face(torso) * self.face_key(face)).sum(-1) / self.FUSION_WIDTH**0.5
+        alpha_hand = torch.sigmoid(hand_score + self.hand_gate_bias) * hand_valid.to(hand.dtype)
+        alpha_face = torch.sigmoid(face_score + self.face_gate_bias) * face_valid.to(face.dtype)
+        fused = torso + alpha_hand.unsqueeze(-1) * hand + alpha_face.unsqueeze(-1) * face
+        valid = body_valid | hand_valid | face_valid
+        fused = fused * valid.unsqueeze(-1).to(fused.dtype)
+        fused = fused.reshape(b, m, target_t, self.FUSION_WIDTH).mean(1)
+        valid = valid.reshape(b, m, target_t).any(1)
+        pooled = (fused * valid.unsqueeze(-1)).sum(1) / valid.sum(1, keepdim=True).clamp_min(1)
+        return self.classifier(pooled)
+
+
+class OfficialCTRGCNFeatureExtractor(nn.Module):
+    """Official CTR-GCN ten-block backbone without its classifier."""
+
+    CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
+
+    def __init__(self, adjacency: torch.Tensor, in_channels: int = 3):
+        super().__init__()
+        adjacency = torch.as_tensor(adjacency, dtype=torch.float32)
+        if adjacency.shape[0] != 3 or adjacency.shape[1] != adjacency.shape[2]:
+            raise ValueError("CTR-GCN adjacency must have shape 3 x V x V")
+        self.num_point = int(adjacency.shape[1])
+        self.in_channels = int(in_channels)
+        self.register_buffer("A", adjacency)
+        self.data_bn = nn.BatchNorm1d(self.in_channels * self.num_point)
+        layers = []
+        cin = self.in_channels
+        for index, cout in enumerate(self.CHANNELS):
+            layers.append(TCNGCNUnit(
+                cin, cout, self.A, stride=2 if index in (4, 7) else 1,
+                residual=index != 0, adaptive=True,
+            ))
+            cin = cout
+        self.blocks = nn.ModuleList(layers)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, int]:
+        b, c, t, v, m = x.shape
+        if (c, v, m) != (self.in_channels, self.num_point, 1):
+            raise ValueError(f"Expected C,V,M=({self.in_channels},{self.num_point},1), got {(c,v,m)}")
+        x = x.permute(0, 4, 3, 1, 2).contiguous().view(b, v * c, t)
+        x = self.data_bn(x)
+        x = x.view(b, 1, v, c, t).permute(0, 1, 3, 4, 2).contiguous().view(b, c, t, v)
+        for block in self.blocks:
+            x = block(x)
+        return x, int(x.shape[2])
+
+
+class OfficialTorsoCenteredCrossBranchFusion(nn.Module):
+    """Official CTR-GCN torso + official ST-GCN hand/face attention fusion."""
+
+    ARCHITECTURE = "rtmw_official_ctr_body22_official_st_handface_torso_attention"
+    BODY_INDICES = tuple(i for i in RTMW_32_NODE_INDICES
+                         if i not in {95, 99, 103, 107, 111, 116, 120, 124, 128, 132})
+    HAND_INDICES = tuple(range(91, 133))
+    FUSION_WIDTH = 256
+
+    def __init__(self, num_classes: int = 120):
+        super().__init__()
+        partition = build_region_partition("rtmw_133", 133)
+        official_graph = build_official_rtmw_adjacency()
+        body_ids = torch.tensor(self.BODY_INDICES, dtype=torch.long)
+        body_graph = official_graph.index_select(1, body_ids).index_select(2, body_ids)
+        # CTR-GCN's reference graph utility uses column-normalized directed
+        # partitions (normalize_digraph), including after the RTMW body
+        # subgraph is induced.
+        body_graph = body_graph / body_graph.sum(1, keepdim=True).clamp_min(1)
+        self.register_buffer("body_indices", body_ids)
+        self.body_encoder = OfficialCTRGCNFeatureExtractor(body_graph)
+
+        compressor = FaceTokenCompression(
+            build_joint_spatial_partitions(133, partition, "rtmw_133", scope="full"),
+            torch.tensor(partition.joint_to_region),
+        )
+        self.register_buffer("face_indices", compressor.face_indices.clone())
+        self.register_buffer("face_members", compressor.face_members.clone())
+        self.register_buffer("hand_indices", torch.tensor(self.HAND_INDICES, dtype=torch.long))
+        full_graph = build_joint_spatial_partitions(133, partition, "rtmw_133", scope="full")
+        local_graph = full_graph.index_select(1, self.hand_indices).index_select(2, self.hand_indices)
+        face_graph = compressor.adjacency[:, 65:, 65:]
+        local_graph = torch.zeros(3, 48, 48, dtype=local_graph.dtype)
+        local_graph[:, :42, :42] = full_graph.index_select(1, self.hand_indices).index_select(2, self.hand_indices)
+        local_graph[:, 42:, 42:] = face_graph
+        # Match ST-GCN's ``normalize_digraph`` convention: normalize each
+        # source column independently within every spatial partition.
+        local_graph = local_graph / local_graph.sum(1, keepdim=True).clamp_min(1)
+        self.local_encoder = OfficialSTGCNFeatureExtractor(3, local_graph)
+
+        self.body_projection = nn.Linear(256, self.FUSION_WIDTH)
+        self.hand_projection = nn.Linear(256, self.FUSION_WIDTH)
+        self.face_projection = nn.Linear(256, self.FUSION_WIDTH)
+        self.torso_norm = nn.LayerNorm(self.FUSION_WIDTH)
+        self.hand_norm = nn.LayerNorm(self.FUSION_WIDTH)
+        self.face_norm = nn.LayerNorm(self.FUSION_WIDTH)
+        self.torso_query_hand = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.hand_key = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.torso_query_face = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.face_key = nn.Linear(self.FUSION_WIDTH, self.FUSION_WIDTH, bias=False)
+        self.hand_gate_bias = nn.Parameter(torch.tensor(-2.0))
+        self.face_gate_bias = nn.Parameter(torch.tensor(-2.0))
+        self.classifier = nn.Linear(self.FUSION_WIDTH, num_classes)
+
+    @staticmethod
+    def _pool_nodes_per_frame(x: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        w = mask.to(x.dtype)
+        count = w.sum(-1).squeeze(1)
+        feat = (x * w).sum(-1).transpose(1, 2) / count.unsqueeze(-1).clamp_min(1)
+        return feat, count > 0
+
+    @staticmethod
+    def _downsample_mask(mask: torch.Tensor, target_t: int) -> torch.Tensor:
+        while mask.shape[2] > target_t:
+            mask = F.max_pool2d(mask.float(), (2, 1), (2, 1), ceil_mode=True).bool()
+        return mask[:, :, :target_t]
+
+    def forward(self, x: torch.Tensor, valid_frame_mask: torch.Tensor | None = None) -> torch.Tensor:
+        if x.ndim == 4:
+            x = x.unsqueeze(-1)
+        if x.ndim != 5 or x.shape[1] != 3 or x.shape[3] != 133:
+            raise ValueError("Expected B x 3 x T x 133 x M RTMW input")
+        b, c, t, _, m = x.shape
+        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(1, keepdim=True)
+        if valid_frame_mask is not None:
+            mask &= valid_frame_mask[:, None, :, None, None].bool()
+        x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, 133)
+        mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, 133)
+        x = x.masked_fill(~mask, 0)
+
+        body = x.index_select(-1, self.body_indices).unsqueeze(-1)
+        bm = mask.index_select(-1, self.body_indices)
+        body, body_t_len = self.body_encoder(body)
+        bm = self._downsample_mask(bm, body_t_len)
+
+        hands = x.index_select(-1, self.hand_indices)
+        hm = mask.index_select(-1, self.hand_indices)
+        fidx = self.face_indices.flatten().to(x.device)
+        fx = x.index_select(-1, fidx).reshape(b * m, 3, t, 6, 12)
+        fm = mask.index_select(-1, fidx).reshape(b * m, 1, t, 6, 12)
+        fm = fm & self.face_members.to(x.device)[None, None, None]
+        fc = fm.sum(-1)
+        face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
+        local = torch.cat((hands, face), -1).unsqueeze(-1)
+        lm = torch.cat((hm, fc > 0), -1)
+        local, local_t_len = self.local_encoder(local)
+        lm = self._downsample_mask(lm, local_t_len)
+        body_t, body_valid = self._pool_nodes_per_frame(body, bm)
+        local_t, local_valid = self._pool_nodes_per_frame(local, lm)
+        if local_t.shape[1] != body_t.shape[1]:
+            local_t = F.interpolate(local_t.transpose(1, 2), size=body_t.shape[1], mode="linear", align_corners=False).transpose(1, 2)
+            local_valid = F.interpolate(local_valid[:, None].float(), size=body_t.shape[1], mode="nearest")[:, 0].bool()
+        hand_t, hand_valid = self._pool_nodes_per_frame(local[..., :42], lm[..., :42])
+        face_t, face_valid = self._pool_nodes_per_frame(local[..., 42:], lm[..., 42:])
+        target_t = body_t.shape[1]
+        if hand_t.shape[1] != target_t:
+            hand_t = F.interpolate(hand_t.transpose(1, 2), size=target_t, mode="linear", align_corners=False).transpose(1, 2)
+            hand_valid = F.interpolate(hand_valid[:, None].float(), size=target_t, mode="nearest")[:, 0].bool()
+        if face_t.shape[1] != target_t:
+            face_t = F.interpolate(face_t.transpose(1, 2), size=target_t, mode="linear", align_corners=False).transpose(1, 2)
+            face_valid = F.interpolate(face_valid[:, None].float(), size=target_t, mode="nearest")[:, 0].bool()
+        torso = self.torso_norm(self.body_projection(body_t))
+        hand = self.hand_norm(self.hand_projection(hand_t))
+        face = self.face_norm(self.face_projection(face_t))
+        hand_score = (self.torso_query_hand(torso) * self.hand_key(hand)).sum(-1) / math.sqrt(self.FUSION_WIDTH)
+        face_score = (self.torso_query_face(torso) * self.face_key(face)).sum(-1) / math.sqrt(self.FUSION_WIDTH)
         alpha_hand = torch.sigmoid(hand_score + self.hand_gate_bias) * hand_valid.to(hand.dtype)
         alpha_face = torch.sigmoid(face_score + self.face_gate_bias) * face_valid.to(face.dtype)
         fused = torso + alpha_hand.unsqueeze(-1) * hand + alpha_face.unsqueeze(-1) * face
