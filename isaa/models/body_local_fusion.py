@@ -246,18 +246,22 @@ class OfficialCTRGCNFeatureExtractor(nn.Module):
 
     CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
 
-    def __init__(self, adjacency: torch.Tensor, in_channels: int = 3):
+    def __init__(self, adjacency: torch.Tensor, in_channels: int = 3,
+                 channels: tuple[int, ...] | None = None):
         super().__init__()
         adjacency = torch.as_tensor(adjacency, dtype=torch.float32)
         if adjacency.shape[0] != 3 or adjacency.shape[1] != adjacency.shape[2]:
             raise ValueError("CTR-GCN adjacency must have shape 3 x V x V")
         self.num_point = int(adjacency.shape[1])
         self.in_channels = int(in_channels)
+        self.channels = tuple(channels or self.CHANNELS)
+        if len(self.channels) != 10:
+            raise ValueError("CTR-GCN feature extractor requires ten channel widths")
         self.register_buffer("A", adjacency)
         self.data_bn = nn.BatchNorm1d(self.in_channels * self.num_point)
         layers = []
         cin = self.in_channels
-        for index, cout in enumerate(self.CHANNELS):
+        for index, cout in enumerate(self.channels):
             layers.append(TCNGCNUnit(
                 cin, cout, self.A, stride=2 if index in (4, 7) else 1,
                 residual=index != 0, adaptive=True,
@@ -285,6 +289,9 @@ class OfficialTorsoCenteredCrossBranchFusion(nn.Module):
                          if i not in {95, 99, 103, 107, 111, 116, 120, 124, 128, 132})
     HAND_INDICES = tuple(range(91, 133))
     FUSION_WIDTH = 256
+    BODY_CHANNELS = (48, 48, 48, 48, 96, 96, 96, 192, 192, 192)
+    LOCAL_CHANNELS = (24, 24, 48, 48, 96, 96)
+    LOCAL_STRIDES = (1, 2, 1, 1, 1, 1)
 
     def __init__(self, num_classes: int = 120):
         super().__init__()
@@ -297,7 +304,7 @@ class OfficialTorsoCenteredCrossBranchFusion(nn.Module):
         # subgraph is induced.
         body_graph = body_graph / body_graph.sum(1, keepdim=True).clamp_min(1)
         self.register_buffer("body_indices", body_ids)
-        self.body_encoder = OfficialCTRGCNFeatureExtractor(body_graph)
+        self.body_encoder = OfficialCTRGCNFeatureExtractor(body_graph, channels=self.BODY_CHANNELS)
 
         compressor = FaceTokenCompression(
             build_joint_spatial_partitions(133, partition, "rtmw_133", scope="full"),
@@ -315,11 +322,13 @@ class OfficialTorsoCenteredCrossBranchFusion(nn.Module):
         # Match ST-GCN's ``normalize_digraph`` convention: normalize each
         # source column independently within every spatial partition.
         local_graph = local_graph / local_graph.sum(1, keepdim=True).clamp_min(1)
-        self.local_encoder = OfficialSTGCNFeatureExtractor(3, local_graph)
+        self.local_encoder = OfficialSTGCNFeatureExtractor(
+            3, local_graph, channels=self.LOCAL_CHANNELS, strides=self.LOCAL_STRIDES,
+        )
 
-        self.body_projection = nn.Linear(256, self.FUSION_WIDTH)
-        self.hand_projection = nn.Linear(256, self.FUSION_WIDTH)
-        self.face_projection = nn.Linear(256, self.FUSION_WIDTH)
+        self.body_projection = nn.Linear(self.BODY_CHANNELS[-1], self.FUSION_WIDTH)
+        self.hand_projection = nn.Linear(self.LOCAL_CHANNELS[-1], self.FUSION_WIDTH)
+        self.face_projection = nn.Linear(self.LOCAL_CHANNELS[-1], self.FUSION_WIDTH)
         self.torso_norm = nn.LayerNorm(self.FUSION_WIDTH)
         self.hand_norm = nn.LayerNorm(self.FUSION_WIDTH)
         self.face_norm = nn.LayerNorm(self.FUSION_WIDTH)

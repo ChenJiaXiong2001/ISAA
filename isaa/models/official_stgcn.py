@@ -90,26 +90,32 @@ class STGCNBlock(nn.Module):
 
 
 class OfficialSTGCNFeatureExtractor(nn.Module):
-    """Official 10-block ST-GCN backbone without the final classifier."""
+    """Reference ST-GCN blocks without the final classifier."""
 
     CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
     STRIDES = (1, 1, 1, 1, 2, 1, 1, 2, 1, 1)
 
     def __init__(self, in_channels: int, adjacency: torch.Tensor,
-                 num_person: int = 1, dropout: float = 0.0) -> None:
+                 num_person: int = 1, dropout: float = 0.0,
+                 channels: tuple[int, ...] | None = None,
+                 strides: tuple[int, ...] | None = None) -> None:
         super().__init__()
         adjacency = torch.as_tensor(adjacency, dtype=torch.float32)
         if adjacency.ndim != 3 or adjacency.shape[0] != 3:
             raise ValueError("ST-GCN adjacency must have shape 3 x V x V")
         self.num_person = int(num_person)
         self.num_point = int(adjacency.shape[1])
+        self.channels = tuple(channels or self.CHANNELS)
+        self.strides = tuple(strides or self.STRIDES)
+        if len(self.channels) != len(self.strides) or not self.channels:
+            raise ValueError("ST-GCN channels and strides must have equal non-zero lengths")
         self.register_buffer("A", adjacency)
         self.data_bn = nn.BatchNorm1d(self.num_person * in_channels * self.num_point)
         layers = []
         cin = in_channels
-        for index, cout in enumerate(self.CHANNELS):
+        for index, cout in enumerate(self.channels):
             layers.append(STGCNBlock(
-                cin, cout, adjacency.shape[0], stride=self.STRIDES[index],
+                cin, cout, adjacency.shape[0], stride=self.strides[index],
                 residual=index != 0, dropout=dropout,
             ))
             cin = cout

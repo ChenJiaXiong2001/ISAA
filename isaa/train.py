@@ -415,7 +415,10 @@ def _run(args, save_dir, records) -> None:
                         "body_indices": list(model.BODY_INDICES), "hand_indices": list(model.HAND_INDICES),
                         "face_tokens": 6,
                         "body_backbone": "official CTR-GCN ten-block feature extractor",
-                        "local_backbone": "official ST-GCN ten-block feature extractor",
+                        "body_channels": model.BODY_CHANNELS,
+                        "local_backbone": "official ST-GCN feature extractor with edge importance",
+                        "local_channels": model.LOCAL_CHANNELS,
+                        "local_strides": model.LOCAL_STRIDES,
                         "fusion": "per-frame torso-query; independent hand/face sigmoid gates"}
     elif args.model_variant == "original":
         aux_stage = args.ablation_stage == "s03_original32_aux"
@@ -518,6 +521,7 @@ def _run(args, save_dir, records) -> None:
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     elif args.model_variant == "torso-cross-attn-official":
         print(f"OfficialTorsoCenteredCrossBranchFusion RTMW body22+hand42+face6 device={device} "
+              f"body_channels={model.BODY_CHANNELS} local_channels={model.LOCAL_CHANNELS} "
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     else:
         print(f"ISAA {model.experiment_name} backbone=ctr_gcn_{args.num_main_nodes} auxiliary={'off' if args.main_only else 'fixed_71'} "
