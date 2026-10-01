@@ -8,6 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from isaa.data.temporal_augmentation import apply_temporal_augmentation
+
 
 class RTMWNpyDataset(Dataset):
     """Read ``data.npy``, ``labels.npy`` and optional ``frame_mask.npy``.
@@ -18,7 +20,8 @@ class RTMWNpyDataset(Dataset):
     """
 
     def __init__(self, directory: str | Path, *, use_frame_mask: bool = False,
-                 max_samples: int = 0) -> None:
+                 max_samples: int = 0, augment: bool = False,
+                 augmentation_config: dict | None = None) -> None:
         directory = Path(directory)
         if not directory.is_dir():
             raise FileNotFoundError(f"预处理目录不存在: {directory}")
@@ -39,6 +42,8 @@ class RTMWNpyDataset(Dataset):
             if self.frame_mask.shape != (self.data.shape[0], self.data.shape[2]):
                 raise ValueError("frame_mask.npy 形状必须为 N x T")
         self.limit = min(int(max_samples), len(self.labels)) if max_samples else len(self.labels)
+        self.augment = bool(augment)
+        self.augmentation_config = dict(augmentation_config or {})
 
     def __len__(self) -> int:
         return self.limit
@@ -50,4 +55,11 @@ class RTMWNpyDataset(Dataset):
             mask = torch.ones(x.shape[1], dtype=torch.bool)
         else:
             mask = torch.from_numpy(np.asarray(self.frame_mask[index], dtype=np.bool_))
+        if self.augment:
+            x, mask = apply_temporal_augmentation(
+                x, mask,
+                crop_min_ratio=float(self.augmentation_config.get("crop_min_ratio", 0.875)),
+                max_shift=int(self.augmentation_config.get("max_shift", 4)),
+                jitter_probability=float(self.augmentation_config.get("jitter_probability", 0.2)),
+            )
         return x, label, mask

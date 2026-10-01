@@ -15,12 +15,15 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from isaa.data.temporal_augmentation import apply_temporal_augmentation
+
 
 class NTUPreprocessedDataset(Dataset):
     """Read one fixed, already-preprocessed NTU60 split."""
 
     def __init__(self, path: str | Path, *, max_samples: int = 0, expected_nodes: int = 25,
-                 window_size: int | None = None) -> None:
+                 window_size: int | None = None, augment: bool = False,
+                 augmentation_config: dict | None = None) -> None:
         self.path = Path(path)
         frame_mask = None
         if self.path.is_dir():
@@ -73,6 +76,8 @@ class NTUPreprocessedDataset(Dataset):
             np.linspace(0, self.source_window_size - 1, self.window_size).round().astype(np.int64)
             if self.window_size != self.source_window_size else None
         )
+        self.augment = bool(augment)
+        self.augmentation_config = dict(augmentation_config or {})
 
     def __len__(self) -> int:
         return self.limit
@@ -95,4 +100,11 @@ class NTUPreprocessedDataset(Dataset):
             mask = torch.ones(x.shape[1], dtype=torch.bool)
         else:
             mask = torch.from_numpy(np.asarray(self.frame_mask[index], dtype=np.bool_))
+        if self.augment:
+            x, mask = apply_temporal_augmentation(
+                x, mask,
+                crop_min_ratio=float(self.augmentation_config.get("crop_min_ratio", 0.875)),
+                max_shift=int(self.augmentation_config.get("max_shift", 4)),
+                jitter_probability=float(self.augmentation_config.get("jitter_probability", 0.2)),
+            )
         return x, label, mask
