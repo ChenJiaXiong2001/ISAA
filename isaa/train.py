@@ -476,9 +476,9 @@ def _run(args, save_dir, records) -> None:
                         "node_indices": model.main_joint_indices.cpu().tolist()}
     temporal_augmented = args.model_variant == "body-local-time-aug"
     temporal_augmentation_config = {
-        "crop_min_ratio": 0.875,
-        "max_shift": 4,
-        "jitter_probability": 0.2,
+        "crop_min_ratio": 0.9375,
+        "max_shift": 2,
+        "jitter_probability": 0.0,
     }
     reference = {
         "repository": "https://github.com/Uason-Chen/CTR-GCN",

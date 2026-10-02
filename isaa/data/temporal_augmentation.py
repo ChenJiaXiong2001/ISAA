@@ -23,9 +23,9 @@ def apply_temporal_augmentation(
     x: torch.Tensor,
     mask: torch.Tensor,
     *,
-    crop_min_ratio: float = 0.875,
-    max_shift: int = 4,
-    jitter_probability: float = 0.2,
+    crop_min_ratio: float = 0.9375,
+    max_shift: int = 2,
+    jitter_probability: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply one mild temporal transform to a fixed-length skeleton window.
 
