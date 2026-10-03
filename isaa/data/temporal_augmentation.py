@@ -69,4 +69,25 @@ def apply_temporal_augmentation(
     return x, mask
 
 
-__all__ = ["apply_temporal_augmentation"]
+def apply_coordinate_noise(
+    x: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    std: float = 0.003,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Add small noise to x/y only; preserve score and padded frames."""
+    if x.ndim != 4 or mask.ndim != 1 or x.shape[1] != mask.shape[0]:
+        raise ValueError("Expected x=[C,T,V,M] and mask=[T]")
+    if x.shape[0] < 2 or std <= 0.0:
+        return x, mask
+    valid = mask.to(device=x.device, dtype=x.dtype).view(1, -1, 1, 1)
+    # Raw RTMW tensors use channel 2 as confidence; zero-confidence padding
+    # must stay exactly zero after augmentation.
+    if x.shape[0] >= 3:
+        valid = valid * (x[2:3] > 0).to(dtype=x.dtype)
+    out = x.clone()
+    out[:2] = out[:2] + torch.randn_like(out[:2]) * float(std) * valid
+    return out, mask
+
+
+__all__ = ["apply_temporal_augmentation", "apply_coordinate_noise"]

@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from isaa.data.temporal_augmentation import apply_temporal_augmentation
+from isaa.data.temporal_augmentation import apply_coordinate_noise, apply_temporal_augmentation
 
 
 class NTUPreprocessedDataset(Dataset):
@@ -101,10 +101,15 @@ class NTUPreprocessedDataset(Dataset):
         else:
             mask = torch.from_numpy(np.asarray(self.frame_mask[index], dtype=np.bool_))
         if self.augment:
-            x, mask = apply_temporal_augmentation(
+            if bool(self.augmentation_config.get("temporal_enabled", True)):
+                x, mask = apply_temporal_augmentation(
+                    x, mask,
+                    crop_min_ratio=float(self.augmentation_config.get("crop_min_ratio", 0.875)),
+                    max_shift=int(self.augmentation_config.get("max_shift", 4)),
+                    jitter_probability=float(self.augmentation_config.get("jitter_probability", 0.2)),
+                )
+            x, mask = apply_coordinate_noise(
                 x, mask,
-                crop_min_ratio=float(self.augmentation_config.get("crop_min_ratio", 0.875)),
-                max_shift=int(self.augmentation_config.get("max_shift", 4)),
-                jitter_probability=float(self.augmentation_config.get("jitter_probability", 0.2)),
+                std=float(self.augmentation_config.get("coordinate_jitter_std", 0.0)),
             )
         return x, label, mask
