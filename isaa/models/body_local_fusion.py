@@ -49,6 +49,7 @@ class BodyLocalFusion(nn.Module):
     CHANNELS = (48, 48, 48, 48, 96, 96, 96, 192, 192, 192)
     LOCAL_CHANNELS = (24, 24, 48, 48)
     LOCAL_STRIDES = (1,)
+    LOCAL_COORDINATE_MODE = "raw"
 
     def __init__(self, num_classes: int = 120, body_channels=None, local_channels=None):
         super().__init__()
@@ -116,10 +117,19 @@ class BodyLocalFusion(nn.Module):
         body = body.reshape(b*m,3,len(self.BODY_INDICES),t).permute(0,1,3,2)
         for block in self.body_blocks:
             body, bm = block(body, bm)
-        hands = x.index_select(-1, torch.tensor(self.HAND_INDICES, device=x.device))
+        local_source = x
+        if self.LOCAL_COORDINATE_MODE == "torso_relative":
+            torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
+            torso_points = x[:, :2].index_select(-1, torso_indices)
+            torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
+            torso_center = (torso_points * torso_mask).sum(-1, keepdim=True) / torso_mask.sum(-1, keepdim=True).clamp_min(1)
+            local_source = x.clone()
+            local_source[:, :2] = local_source[:, :2] - torso_center
+
+        hands = local_source.index_select(-1, torch.tensor(self.HAND_INDICES, device=x.device))
         hm = mask.index_select(-1, torch.tensor(self.HAND_INDICES, device=x.device))
         fidx = self.face_indices.flatten().to(x.device)
-        fx = x.index_select(-1, fidx).reshape(b*m,3,t,6,12)
+        fx = local_source.index_select(-1, fidx).reshape(b*m,3,t,6,12)
         fm = mask.index_select(-1, fidx).reshape(b*m,1,t,6,12) & self.face_members.to(x.device)[None,None,None]
         fc = fm.sum(-1)
         face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
@@ -130,6 +140,13 @@ class BodyLocalFusion(nn.Module):
         bv = self._masked_pool(body, bm).reshape(b,m,-1).mean(1)
         lv = self._masked_pool(local, lm).reshape(b,m,-1).mean(1)
         return self.classifier(torch.cat((self.body_projection(bv), self.local_projection(lv)), dim=1))
+
+
+class BodyLocalRelativeFusion(BodyLocalFusion):
+    """Body-local model using torso-relative xy for the hand/face branch only."""
+
+    ARCHITECTURE = "rtmw_ctr22_st48_handface_torso_relative_v1"
+    LOCAL_COORDINATE_MODE = "torso_relative"
 
 
 class BodyLocalDropoutFusion(BodyLocalFusion):
