@@ -132,6 +132,25 @@ class BodyLocalFusion(nn.Module):
         return self.classifier(torch.cat((self.body_projection(bv), self.local_projection(lv)), dim=1))
 
 
+class BodyLocalDropoutFusion(BodyLocalFusion):
+    """Body-local baseline with dropout only at branch fusion projections."""
+
+    ARCHITECTURE = "rtmw_ctr22_st48_handface_dropout_v1"
+    DROPOUT = 0.2
+
+    def __init__(self, num_classes: int = 120):
+        super().__init__(num_classes=num_classes)
+        self.body_projection = nn.Sequential(
+            nn.Linear(self.CHANNELS[-1], 192), nn.ReLU(), nn.Dropout(self.DROPOUT)
+        )
+        self.local_projection = nn.Sequential(
+            nn.Linear(self.LOCAL_CHANNELS[-1], 96), nn.ReLU(), nn.Dropout(self.DROPOUT)
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(self.DROPOUT), nn.Linear(288, num_classes)
+        )
+
+
 class BodyLocalFullFusion(BodyLocalFusion):
     """Full-width 10-layer ST-GCN local branch for comparison with baseline."""
 
