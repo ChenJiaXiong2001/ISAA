@@ -14,9 +14,10 @@ from isaa.data.temporal_augmentation import apply_coordinate_noise, apply_tempor
 class RTMWNpyDataset(Dataset):
     """Read ``data.npy``, ``labels.npy`` and optional ``frame_mask.npy``.
 
-    ``data.npy`` is stored as ``N x 3 x T x 32 x M`` and already contains
-    relative x/y plus score.  NumPy memmap keeps the training process from
-    copying the complete dataset during startup.
+    ``data.npy`` is stored as ``N x C x T x V x M``. Three-channel files
+    use the original features; five-channel files also carry precomputed
+    torso-relative x/y in channels 3:5. NumPy memmap avoids copying the full
+    dataset during startup.
     """
 
     def __init__(self, directory: str | Path, *, use_frame_mask: bool = False,
@@ -31,8 +32,8 @@ class RTMWNpyDataset(Dataset):
             raise FileNotFoundError(f"预处理目录必须包含 data.npy 和 labels.npy: {directory}")
         self.data = np.load(data_path, mmap_mode="r")
         self.labels = np.load(labels_path, mmap_mode="r")
-        if self.data.ndim != 5 or self.data.shape[1] != 3 or self.data.shape[3] not in (25, 32, 133):
-            raise ValueError(f"data.npy 必须是 N x 3 x T x (25/32/133) x M，当前为 {self.data.shape}")
+        if self.data.ndim != 5 or self.data.shape[1] not in (3, 5) or self.data.shape[3] not in (25, 32, 133):
+            raise ValueError(f"data.npy 必须是 N x (3/5) x T x (25/32/133) x M，当前为 {self.data.shape}")
         if self.labels.ndim != 1 or self.labels.shape[0] != self.data.shape[0]:
             raise ValueError("labels.npy 必须是一维且样本数与 data.npy 一致")
         self.frame_mask = None
@@ -63,8 +64,18 @@ class RTMWNpyDataset(Dataset):
                     max_shift=int(self.augmentation_config.get("max_shift", 4)),
                     jitter_probability=float(self.augmentation_config.get("jitter_probability", 0.2)),
                 )
-            x, mask = apply_coordinate_noise(
-                x, mask,
-                std=float(self.augmentation_config.get("coordinate_jitter_std", 0.0)),
-            )
+            if x.shape[0] == 5:
+                relative = x[3:5].clone()
+                original_xy = x[:2].clone()
+                raw, mask = apply_coordinate_noise(
+                    x[:3], mask,
+                    std=float(self.augmentation_config.get("coordinate_jitter_std", 0.0)),
+                )
+                relative += raw[:2] - original_xy
+                x = torch.cat((raw, relative), dim=0)
+            else:
+                x, mask = apply_coordinate_noise(
+                    x, mask,
+                    std=float(self.augmentation_config.get("coordinate_jitter_std", 0.0)),
+                )
         return x, label, mask

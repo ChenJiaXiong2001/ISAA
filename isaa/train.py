@@ -527,8 +527,10 @@ def _run(args, save_dir, records) -> None:
                                    "cudnn": cudnn_version,
                                    "cudnn_enabled": torch.backends.cudnn.enabled},
                           reference=reference,
-                          preprocessing={"channels": (["x", "y", "score"] if args.feature_mode == "raw"
-                                                     else ["relative_x", "relative_y", "score"]),
+                          preprocessing={"channels": (["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y"]
+                                                      if args.model_variant == "body-local-relative-split" else
+                                                      (["x", "y", "score"] if args.feature_mode == "raw"
+                                                       else ["relative_x", "relative_y", "score"])),
                                          "crop": ("precomputed fixed window" if args.npy_dir else
                                                   "random fixed window / center validation, pad short clips"),
                                          "augmentation": ({
@@ -587,7 +589,8 @@ def _run(args, save_dir, records) -> None:
         synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
             args.node_count if args.main_only else 133
         )
-        x = torch.randn(2, 3, args.window_size, synthetic_nodes, people, device=device)
+        synthetic_channels = 5 if args.model_variant == "body-local-relative-split" else 3
+        x = torch.randn(2, synthetic_channels, args.window_size, synthetic_nodes, people, device=device)
         x[:, 2] = 1
         if args.main_only and synthetic_nodes == 133:
             x = x.index_select(3, model.main_joint_indices)

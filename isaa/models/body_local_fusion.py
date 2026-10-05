@@ -153,6 +153,7 @@ class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
     """Relative-coordinate model with independent hand and face ST-GCNs."""
 
     ARCHITECTURE = "rtmw_ctr22_st42_hand_st6_face_torso_relative_v1"
+    LOCAL_COORDINATE_MODE = "torso_relative_precomputed"
 
     def __init__(self, num_classes: int = 120):
         super().__init__(num_classes=num_classes)
@@ -186,17 +187,17 @@ class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
     def forward(self, x, valid_frame_mask=None):
         if x.ndim == 4:
             x = x.unsqueeze(-1)
-        if x.ndim != 5 or x.shape[1] != 3 or x.shape[3] != 133:
-            raise ValueError("Expected B x 3 x T x 133 x M RTMW input")
+        if x.ndim != 5 or x.shape[1] != 5 or x.shape[3] != 133:
+            raise ValueError("Expected B x 5 x T x 133 x M RTMW input with precomputed relative xy")
         b, c, t, _, m = x.shape
-        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(1, keepdim=True)
+        mask = (x[:, 2:3] > 0) & torch.isfinite(x[:, :3]).all(1, keepdim=True)
         if valid_frame_mask is not None:
             mask &= valid_frame_mask[:, None, :, None, None].bool()
         x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, 133)
         mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, 133)
         x = x.masked_fill(~mask, 0)
 
-        body = x.index_select(-1, self.body_indices)
+        body = x[:, :3].index_select(-1, self.body_indices)
         bm = mask.index_select(-1, self.body_indices)
         norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
             b * m, 3 * len(self.BODY_INDICES), t, 1)
@@ -206,12 +207,7 @@ class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
         for block in self.body_blocks:
             body, bm = block(body, bm)
 
-        torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
-        torso_points = x[:, :2].index_select(-1, torso_indices)
-        torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
-        torso_center = (torso_points * torso_mask).sum(-1, keepdim=True) / torso_mask.sum(-1, keepdim=True).clamp_min(1)
-        local_source = x.clone()
-        local_source[:, :2] = local_source[:, :2] - torso_center
+        local_source = torch.cat((x[:, 3:5], x[:, 2:3]), dim=1)
 
         hand_indices = torch.tensor(self.HAND_INDICES, device=x.device)
         hands = local_source.index_select(-1, hand_indices)
