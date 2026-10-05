@@ -251,7 +251,14 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         local_valid = hand_valid | face_valid
         local_t = (hand_t + face_t) * 0.5
         local_t = local_t * local_valid.unsqueeze(-1).to(local_t.dtype)
-        lv = self.local_projection(local_t.mean(1))
+        # Keep the person aggregation consistent with the torso branch.  The
+        # hand/face path is still flattened as ``B*M`` at this point; reducing
+        # only the time axis would leave ``lv`` with a ``B*M`` batch dimension
+        # and make the final concat fail whenever more than one person is
+        # present.  Restore ``(B, M, T, C)`` before averaging people and time.
+        lv = self.local_projection(
+            local_t.reshape(b, m, target_t, -1).mean(1).mean(1)
+        )
         return self.classifier(torch.cat((bv, lv), dim=1))
 
 
