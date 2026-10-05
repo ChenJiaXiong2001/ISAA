@@ -25,6 +25,7 @@ from isaa.data.ntu_preprocessed_dataset import NTUPreprocessedDataset
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
 from isaa.models.body_local_fusion import (
     BodyLocalFusion, BodyLocalDropoutFusion, BodyLocalFullFusion, BodyLocalRelativeFusion,
+    BodyLocalRelativeSplitFusion,
     TorsoCenteredCrossBranchFusion,
     OfficialTorsoCenteredCrossBranchFusion,
 )
@@ -73,8 +74,8 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
-                        help="body-local-relative uses torso-relative xy for hand/face ST-GCN")
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
+                        help="relative variants use torso-relative xy; relative-split separates hand and face ST-GCNs")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
     parser.add_argument("--max-persons", type=int, default=2,
@@ -163,7 +164,7 @@ def parse_args() -> argparse.Namespace:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if args.node_count is None:
         args.node_count = args.num_main_nodes
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
         args.main_only = False
         args.node_count = 133
         args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
@@ -341,6 +342,8 @@ def main() -> None:
         variant = BodyLocalDropoutFusion.ARCHITECTURE
     elif args.model_variant == "body-local-relative":
         variant = BodyLocalRelativeFusion.ARCHITECTURE
+    elif args.model_variant == "body-local-relative-split":
+        variant = BodyLocalRelativeSplitFusion.ARCHITECTURE
     elif args.model_variant == "body-local-full":
         variant = BodyLocalFullFusion.ARCHITECTURE
     elif args.model_variant == "torso-cross-attn":
@@ -399,8 +402,9 @@ def _run(args, save_dir, records) -> None:
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug"}:
-        model_class = (BodyLocalDropoutFusion if args.model_variant == "body-local-dropout"
+    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug"}:
+        model_class = (BodyLocalRelativeSplitFusion if args.model_variant == "body-local-relative-split"
+                       else BodyLocalDropoutFusion if args.model_variant == "body-local-dropout"
                        else BodyLocalRelativeFusion if args.model_variant == "body-local-relative"
                        else BodyLocalFusion)
         model = model_class(num_classes=args.num_classes).to(device)
@@ -409,7 +413,9 @@ def _run(args, save_dir, records) -> None:
                         "face_tokens": 6, "local_nodes": 48,
                         "body_channels": model.CHANNELS, "local_channels": model.LOCAL_CHANNELS,
                         "fusion_dropout": float(getattr(model, "DROPOUT", 0.0)),
-                        "local_coordinate_mode": getattr(model, "LOCAL_COORDINATE_MODE", "raw")}
+                        "local_coordinate_mode": getattr(model, "LOCAL_COORDINATE_MODE", "raw"),
+                        "local_branch_mode": ("independent_hand_face" if args.model_variant == "body-local-relative-split"
+                                              else "joint_hand_face")}
     elif args.model_variant == "body-local-full":
         model = BodyLocalFullFusion(num_classes=args.num_classes).to(device)
         model_config = {"variant": "body-local-full", "num_classes": args.num_classes,
@@ -503,7 +509,7 @@ def _run(args, save_dir, records) -> None:
                     else "config/nturgbd120-cross-subject/default.yaml")),
         "schedule": "main.py:adjust_learning_rate (zero-based milestones)",
         "adaptation": ("experimental body22 CTR-GCN + hand42/face6 ST-GCN, normalized features, pre-classifier fusion"
-                       if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
+                       if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
                        (f"official RTMW induced {args.node_count}-node graph, raw x/y/score, ordinary BN, no masks"
                         if args.model_variant == "original" else
                         "RTMW relative xy/score, masks, 32 joints; existing crop/pad preprocessing")),
@@ -539,8 +545,9 @@ def _run(args, save_dir, records) -> None:
             stage_label = _IMPLEMENTED_ABLATION_STAGES.get(args.ablation_stage or "", {}).get("label")
             print(f"ablation_stage: {args.ablation_stage}"
                   + (f" ({stage_label})" if stage_label else ""), flush=True)
-    elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug"}:
-        label = ("BodyLocalRelativeFusion" if args.model_variant == "body-local-relative"
+    elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug"}:
+        label = ("BodyLocalRelativeSplitFusion" if args.model_variant == "body-local-relative-split"
+                 else "BodyLocalRelativeFusion" if args.model_variant == "body-local-relative"
                  else "BodyLocalDropoutFusion" if args.model_variant == "body-local-dropout"
                  else "BodyLocalFusionTimeAug" if args.model_variant == "body-local-time-aug"
                  else "BodyLocalFusionCoordAug" if args.model_variant == "body-local-coord-aug"
@@ -576,8 +583,8 @@ def _run(args, save_dir, records) -> None:
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "
           f"prefetch_factor={args.prefetch_factor if args.num_workers > 0 else None}", flush=True)
     if args.dry_run:
-        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
-        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
+        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
+        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
             args.node_count if args.main_only else 133
         )
         x = torch.randn(2, 3, args.window_size, synthetic_nodes, people, device=device)
@@ -590,7 +597,7 @@ def _run(args, save_dir, records) -> None:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
-            elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+            elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
@@ -617,7 +624,7 @@ def _run(args, save_dir, records) -> None:
     loaders = {}
     dataset_info = {}
     if args.npy_dir:
-        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             npy_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         elif args.main_only:
             npy_indices = model.main_joint_indices.cpu()
@@ -625,7 +632,7 @@ def _run(args, save_dir, records) -> None:
             npy_indices = None
         collate = partial(collate_preprocessed, main_indices=npy_indices)
     else:
-        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             main_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         else:
             main_indices = model.main_joint_indices.cpu() if args.main_only else None
@@ -731,6 +738,8 @@ def _run(args, save_dir, records) -> None:
             stage = "body22_ctr+hands42_face6_stgcn_dropout_fusion"
         elif args.model_variant == "body-local-relative":
             stage = "body22_ctr+hands42_face6_stgcn_torso_relative"
+        elif args.model_variant == "body-local-relative-split":
+            stage = "body22_ctr+hand_stgcn_face_stgcn_torso_relative"
         elif args.model_variant == "body-local-full":
             stage = "body22_ctr+hands42_face6_stgcn_full"
         elif args.model_variant == "torso-cross-attn":

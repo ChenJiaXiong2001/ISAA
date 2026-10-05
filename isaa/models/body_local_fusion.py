@@ -149,6 +149,93 @@ class BodyLocalRelativeFusion(BodyLocalFusion):
     LOCAL_COORDINATE_MODE = "torso_relative"
 
 
+class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
+    """Relative-coordinate model with independent hand and face ST-GCNs."""
+
+    ARCHITECTURE = "rtmw_ctr22_st42_hand_st6_face_torso_relative_v1"
+
+    def __init__(self, num_classes: int = 120):
+        super().__init__(num_classes=num_classes)
+        # Replace the joint 48-node graph with two independent ST-GCN stacks.
+        # Keep the same layer widths and temporal strides as the best relative
+        # model so this experiment isolates separate branch processing.
+        self.local_blocks = nn.ModuleList()
+        self.hand_blocks = nn.ModuleList()
+        self.face_blocks = nn.ModuleList()
+
+        hand_graph = build_joint_adjacency(133, "rtmw_133")
+        hidx = torch.tensor(self.HAND_INDICES)
+        hand_graph = hand_graph.index_select(0, hidx).index_select(1, hidx)
+        hand_graph = hand_graph / hand_graph.sum(-1, keepdim=True).clamp_min(1)
+        # The best relative model's face-token partition uses self-loops only.
+        face_graph = torch.eye(6, dtype=hand_graph.dtype)
+
+        for graph, blocks in ((hand_graph, self.hand_blocks), (face_graph, self.face_blocks)):
+            cin = 3
+            for i, cout in enumerate(self.LOCAL_CHANNELS):
+                stride = 2 if i in self.LOCAL_STRIDES else 1
+                blocks.append(LocalSTBlock(cin, cout, graph, stride))
+                cin = cout
+
+        # Preserve the original 96-dimensional local representation and 288-D
+        # classifier input: hand contributes 64 dims, face contributes 32.
+        self.hand_projection = nn.Sequential(nn.Linear(self.LOCAL_CHANNELS[-1], 64), nn.ReLU())
+        self.face_projection = nn.Sequential(nn.Linear(self.LOCAL_CHANNELS[-1], 32), nn.ReLU())
+        self.local_projection = nn.Identity()
+
+    def forward(self, x, valid_frame_mask=None):
+        if x.ndim == 4:
+            x = x.unsqueeze(-1)
+        if x.ndim != 5 or x.shape[1] != 3 or x.shape[3] != 133:
+            raise ValueError("Expected B x 3 x T x 133 x M RTMW input")
+        b, c, t, _, m = x.shape
+        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(1, keepdim=True)
+        if valid_frame_mask is not None:
+            mask &= valid_frame_mask[:, None, :, None, None].bool()
+        x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, 133)
+        mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, 133)
+        x = x.masked_fill(~mask, 0)
+
+        body = x.index_select(-1, self.body_indices)
+        bm = mask.index_select(-1, self.body_indices)
+        norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
+            b * m, 3 * len(self.BODY_INDICES), t, 1)
+        body = self.body_input_norm(body.permute(0, 1, 3, 2).reshape(
+            b * m, 3 * len(self.BODY_INDICES), t, 1), norm_mask)
+        body = body.reshape(b * m, 3, len(self.BODY_INDICES), t).permute(0, 1, 3, 2)
+        for block in self.body_blocks:
+            body, bm = block(body, bm)
+
+        torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
+        torso_points = x[:, :2].index_select(-1, torso_indices)
+        torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
+        torso_center = (torso_points * torso_mask).sum(-1, keepdim=True) / torso_mask.sum(-1, keepdim=True).clamp_min(1)
+        local_source = x.clone()
+        local_source[:, :2] = local_source[:, :2] - torso_center
+
+        hand_indices = torch.tensor(self.HAND_INDICES, device=x.device)
+        hands = local_source.index_select(-1, hand_indices)
+        hm = mask.index_select(-1, hand_indices)
+        for block in self.hand_blocks:
+            hands, hm = block(hands, hm)
+
+        fidx = self.face_indices.flatten().to(x.device)
+        fx = local_source.index_select(-1, fidx).reshape(b * m, 3, t, 6, 12)
+        fm = mask.index_select(-1, fidx).reshape(b * m, 1, t, 6, 12)
+        fm = fm & self.face_members.to(x.device)[None, None, None]
+        fc = fm.sum(-1)
+        face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
+        fm = fc > 0
+        for block in self.face_blocks:
+            face, fm = block(face, fm)
+
+        bv = self._masked_pool(body, bm).reshape(b, m, -1).mean(1)
+        hv = self._masked_pool(hands, hm).reshape(b, m, -1).mean(1)
+        fv = self._masked_pool(face, fm).reshape(b, m, -1).mean(1)
+        local = torch.cat((self.hand_projection(hv), self.face_projection(fv)), dim=1)
+        return self.classifier(torch.cat((self.body_projection(bv), local), dim=1))
+
+
 class BodyLocalDropoutFusion(BodyLocalFusion):
     """Body-local baseline with dropout only at branch fusion projections."""
 
