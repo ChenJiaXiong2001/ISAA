@@ -101,8 +101,6 @@ def parse_args() -> argparse.Namespace:
                         help="compact: 48/96/192 channels; standard: original 64/128/256")
     parser.add_argument("--native-bn", action=argparse.BooleanOptionalAction, default=None,
                         help="Use native BatchNorm2d for the legacy ISAA main-only model")
-    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False,
-                        help="Use torch.compile on CUDA; disabled by default for the reproducible baseline")
     parser.add_argument("--compile-mode", choices=("default", "reduce-overhead", "max-autotune"),
                         default="reduce-overhead")
     parser.add_argument("--lr", type=float, default=0.1)
@@ -121,8 +119,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=float, default=0.5, help="Progress refresh interval in seconds")
     parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True,
                         help="Allow CUDA TF32 matmul/convolution; --no-tf32 uses full FP32 precision")
-    parser.add_argument("--cudnn", action=argparse.BooleanOptionalAction, default=False,
-                        help="Use cuDNN for CUDA convolutions; disabled by default to match the recorded baseline")
     parser.add_argument("--max-samples", type=int, default=0, help="Per split; 0 uses all samples")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda or cuda:0")
     parser.add_argument("--save-dir", default=None, help="Parent directory; each run creates a unique subdirectory")
@@ -397,16 +393,16 @@ def _run(args, save_dir, records) -> None:
     cudnn_version = None
     if device.type == "cpu":
         torch.set_num_threads(min(8, torch.get_num_threads()))
-    elif device.type == "cuda":
-        if args.cudnn:
-            try:
-                cudnn_version = torch.backends.cudnn.version()
-            except RuntimeError as exc:
-                print(f"warning: cuDNN initialization failed; falling back to native CUDA kernels: {exc}",
-                      flush=True)
-                args.cudnn = False
-        torch.backends.cudnn.enabled = args.cudnn
-        torch.backends.cudnn.benchmark = args.cudnn
+    if hasattr(torch.backends, "cudnn"):
+        try:
+            cudnn_version = torch.backends.cudnn.version()
+        except RuntimeError as exc:
+            raise RuntimeError("cuDNN initialization failed; cuDNN is mandatory in this project") from exc
+        # cuDNN is a required backend. There is intentionally no command-line
+        # switch or fallback path that disables it.
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = device.type == "cuda"
+    if device.type == "cuda":
         torch.backends.cudnn.allow_tf32 = args.tf32
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
@@ -594,7 +590,7 @@ def _run(args, save_dir, records) -> None:
     print(f"records: {save_dir}", flush=True)
     if device.type == "cuda":
         print(f"runtime: gpu={torch.cuda.get_device_name(device)} tf32={args.tf32} "
-              f"cudnn={args.cudnn} cudnn_benchmark={args.cudnn}",
+              f"cudnn=True cudnn_benchmark=True",
               flush=True)
     print(f"runtime: batch_size={args.batch_size} grad_accum_steps={args.grad_accum_steps} "
           f"effective_batch_size={args.batch_size * args.grad_accum_steps} num_workers={args.num_workers} "
@@ -628,13 +624,11 @@ def _run(args, save_dir, records) -> None:
                       f"finite={torch.isfinite(result['logits']).all().item()}")
         return
 
-    compile_enabled = args.compile if args.compile is not None else device.type == "cuda"
-    train_model = model
-    if compile_enabled:
-        if not hasattr(torch, "compile"):
-            raise RuntimeError("--compile requested, but this PyTorch has no torch.compile")
-        print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
-        train_model = torch.compile(model, mode=args.compile_mode)
+    if not hasattr(torch, "compile"):
+        raise RuntimeError("torch.compile is required in this project, but this PyTorch has no torch.compile")
+    compile_enabled = True
+    print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
+    train_model = torch.compile(model, mode=args.compile_mode)
     records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode})
 
     archive = Path(args.archive)

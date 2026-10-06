@@ -68,8 +68,8 @@ RTMDet-tiny 负责正常样本，原始质量检查失败样本使用 YOLO26-X �
 | 预热 | 前 5 轮 |
 | 学习率衰减 | 零基轮次 35、55 |
 | 随机种子 | 1 |
-| cuDNN | 默认关闭，匹配已记录实验 |
-| torch.compile | 默认关闭，匹配已记录实验 |
+| cuDNN | 强制开启 |
+| torch.compile | 强制开启 |
 | DataLoader workers | 8 |
 
 BodyLocalFusion 不使用 32 点输入。32 点 main-only CTR-GCN 已降为显式的历史对照模型。
@@ -94,9 +94,7 @@ python main.py \
   --batch-size 32 \
   --test-batch-size 32 \
   --epochs 65 \
-  --num-workers 8 \
-  --no-cudnn \
-  --no-compile
+  --num-workers 8
 ~~~
 
 如果使用已经预处理的 NumPy 数据：
@@ -112,9 +110,7 @@ python main.py \
   --test-batch-size 32 \
   --epochs 65 \
   --num-workers 8 \
-  --device cuda \
-  --no-cudnn \
-  --no-compile
+  --device cuda
 ~~~
 
 CPU smoke test：
