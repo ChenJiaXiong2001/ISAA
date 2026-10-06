@@ -1,8 +1,9 @@
-"""Experimental RTMW body CTR-GCN + hand/face ST-GCN classifier.
+"""Current RTMW body CTR-GCN + hand/face ST-GCN action classifier.
 
-This model is opt-in and leaves the existing model implementations untouched.
-It consumes the full normalized RTMW-133 tensor and fuses pooled branch
-features only immediately before classification.
+BodyLocalFusion is the project's default research baseline. It consumes the
+full RTMW-133 tensor with raw x/y/score channels and fuses pooled body and local branch
+features immediately before classification. Legacy 32-node ISAA models and
+newer attention variants remain selectable for explicit comparisons.
 """
 from __future__ import annotations
 
@@ -174,6 +175,11 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         for cout in self.LOCAL_CHANNELS:
             self.face_st_blocks.append(LocalSTBlock(cin, cout, face_graph, stride=1))
             cin = cout
+        # Hand and face branches are fused frame-by-frame.  Keep the face
+        # representation at 48 channels while allowing wider hand stacks in
+        # derived ablations.
+        self.hand_to_local = (nn.Identity() if self.HAND_CHANNELS[-1] == self.LOCAL_CHANNELS[-1]
+                              else nn.Conv2d(self.HAND_CHANNELS[-1], self.LOCAL_CHANNELS[-1], 1, bias=False))
 
     def _run_hand(self, hand, hand_mask):
         for block in self.hand_ctr_blocks:
@@ -223,6 +229,8 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         hm1 = mask[..., 112:133]
         hand0, hm0 = self._run_hand(hand0, hm0)
         hand1, hm1 = self._run_hand(hand1, hm1)
+        hand0 = self.hand_to_local(hand0)
+        hand1 = self.hand_to_local(hand1)
         hand_t0, hand_valid0 = self._pool_nodes_per_frame(hand0, hm0)
         hand_t1, hand_valid1 = self._pool_nodes_per_frame(hand1, hm1)
         hand_t = (hand_t0 + hand_t1) * 0.5
@@ -260,6 +268,18 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
             local_t.reshape(b, m, target_t, -1).mean(1).mean(1)
         )
         return self.classifier(torch.cat((bv, lv), dim=1))
+
+
+class BodyLocalHandCTRWideRelativeFusion(BodyLocalHandCTRRelativeFusion):
+    """Torso-relative hand CTR-GCN width ablation.
+
+    The two hands still share one CTR-GCN stack.  The wider 96-channel output
+    is projected to the existing 48-channel local fusion width so the face
+    branch and classifier contract remain unchanged.
+    """
+
+    ARCHITECTURE = "rtmw_ctr22_handctr21_wide_facest48_torso_relative_v1"
+    HAND_CHANNELS = (32, 32, 64, 64, 96, 96)
 
 
 class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
