@@ -253,13 +253,20 @@ class RTMWLocalCTRTests(unittest.TestCase):
         with patch("sys.argv", ["main.py"]):
             args = parse_args()
             self.assertEqual(args.backbone_width, "standard")
-            self.assertTrue(args.main_only)
-            self.assertEqual((args.batch_size, args.test_batch_size, args.epochs), (64, 64, 65))
+            self.assertEqual(args.model_variant, "body-local")
+            self.assertFalse(args.main_only)
+            self.assertEqual(args.archive, "data/ntu60_skeletons_rtmw.zip")
+            self.assertEqual(args.split, "xsub60")
+            self.assertEqual((args.batch_size, args.test_batch_size, args.epochs), (32, 32, 65))
             self.assertEqual((args.lr, args.weight_decay, args.momentum), (0.1, 0.0004, 0.9))
             self.assertEqual((args.warmup_epochs, args.lr_steps), (5, [35, 55]))
             self.assertTrue(args.nesterov)
         with patch("sys.argv", ["main.py", "--backbone-width", "standard"]):
             self.assertEqual(parse_args().backbone_width, "standard")
+        with patch("sys.argv", ["main.py", "--model-variant", "isaa"]):
+            legacy = parse_args()
+            self.assertTrue(legacy.main_only)
+            self.assertEqual((legacy.feature_mode, legacy.node_count), ("isaa", 32))
         with self.assertRaises(ValueError):
             RTMWLocalCTR(backbone_width="unknown")
 
