@@ -15,6 +15,50 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
+def _prefer_bundled_cuda_libraries() -> None:
+    """Make the PyTorch wheel's CUDA libraries win over system CUDA paths.
+
+    The server also has CUDA 12.5/cuDNN 9.3 installed under ``/usr/local``.
+    PyTorch 2.14.0+cu126 requires its bundled cuDNN 9.10.2, and an inherited
+    ``LD_LIBRARY_PATH`` can otherwise make the first cuDNN load fail before
+    training starts.  Set this before importing torch so every train launch,
+    including nohup/queued launches, resolves the compatible libraries.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    py_tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    nvidia_root = Path(sys.prefix) / "lib" / py_tag / "site-packages" / "nvidia"
+    bundled = [
+        nvidia_root / "cudnn" / "lib",
+        nvidia_root / "cublas" / "lib",
+        nvidia_root / "cuda_runtime" / "lib",
+    ]
+    bundled = [path for path in bundled if path.is_dir()]
+    if not bundled:
+        return
+    existing = os.environ.get("LD_LIBRARY_PATH", "").split(":")
+    # Drop inherited CUDA/cuDNN directories.  PyTorch's wheel supplies the
+    # matching runtime; retaining /usr/local/cuda/lib64 can reintroduce 9.3.
+    filtered = [
+        path for path in existing
+        if path
+        and "/usr/local/cuda" not in path
+        and "/usr/local/lib64" not in path
+        and "cudnn" not in path.lower()
+    ]
+    desired = ":".join([str(path) for path in bundled] + filtered)
+    # The dynamic loader reads LD_LIBRARY_PATH before Python starts.  Re-exec
+    # once so changing it here also affects libraries loaded by torch later.
+    if os.environ.get("ISAA_CUDNN_ENV_FIXED") != "1":
+        os.environ["LD_LIBRARY_PATH"] = desired
+        os.environ["ISAA_CUDNN_ENV_FIXED"] = "1"
+        os.execvpe(sys.executable, [sys.executable, *sys.argv], os.environ)
+    os.environ["LD_LIBRARY_PATH"] = desired
+
+
+_prefer_bundled_cuda_libraries()
+
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, default_collate

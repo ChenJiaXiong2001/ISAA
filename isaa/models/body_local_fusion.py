@@ -31,9 +31,15 @@ class LocalSTBlock(nn.Module):
         self.stride = stride
         self.residual = nn.Conv2d(cin, cout, 1, bias=False) if cin != cout or stride != 1 else nn.Identity()
 
+    @torch._dynamo.disable
     def forward(self, x, mask):
+        # Keep the graph-convolution result in a stable NCHW layout.  Without
+        # this explicit materialization, torch.compile can record the training
+        # einsum stride and reject the different validation stride in cuDAGs.
+        x = x.clone(memory_format=torch.contiguous_format)
         y = torch.einsum("bctn,nm->bctm", self.spatial(x), self.adjacency)
-        y = self.temporal(y.masked_fill(~mask, 0))
+        y = y.clone(memory_format=torch.contiguous_format)
+        y = self.temporal(y.masked_fill(~mask, 0).clone(memory_format=torch.contiguous_format))
         if self.stride > 1:
             mask = F.max_pool2d(mask.float(), (self.stride, 1), (self.stride, 1), ceil_mode=True).bool()
         residual = self.residual(x)
