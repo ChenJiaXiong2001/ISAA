@@ -466,6 +466,7 @@ def _run(args, save_dir, records) -> None:
                         "fusion_dropout": float(getattr(model, "DROPOUT", 0.0)),
                         "local_coordinate_mode": getattr(model, "LOCAL_COORDINATE_MODE", "raw"),
                         "hand_channels": getattr(model, "HAND_CHANNELS", None),
+                        "hand_input_channels": getattr(model, "HAND_INPUT_CHANNELS", 3),
                         "local_branch_mode": ("shared_hand_ctr_wide_face_st" if args.model_variant == "body-local-hand-ctr-wide-relative"
                                               else "shared_hand_ctr_face_st" if args.model_variant == "body-local-hand-ctr-relative"
                                               else "independent_hand_face" if args.model_variant == "body-local-relative-split"
@@ -583,8 +584,10 @@ def _run(args, save_dir, records) -> None:
                           reference=reference,
                           preprocessing={"channels": (["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y"]
                                                       if args.model_variant == "body-local-relative-split" else
+                                                      (["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y", "cross_hand_distance", "cross_hand_direction_x", "cross_hand_direction_y"]
+                                                       if args.model_variant == "body-local-hand-ctr-wide-relative" else
                                                       (["x", "y", "score"] if args.feature_mode == "raw"
-                                                       else ["relative_x", "relative_y", "score"])),
+                                                       else ["relative_x", "relative_y", "score"]))),
                                          "crop": ("precomputed fixed window" if args.npy_dir else
                                                   "random fixed window / center validation, pad short clips"),
                                          "augmentation": ({
@@ -645,7 +648,8 @@ def _run(args, save_dir, records) -> None:
         synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
             args.node_count if args.main_only else 133
         )
-        synthetic_channels = 5 if args.model_variant == "body-local-relative-split" else 3
+        synthetic_channels = (8 if args.model_variant == "body-local-hand-ctr-wide-relative"
+                              else 5 if args.model_variant == "body-local-relative-split" else 3)
         x = torch.randn(2, synthetic_channels, args.window_size, synthetic_nodes, people, device=device)
         x[:, 2] = 1
         if args.main_only and synthetic_nodes == 133:
@@ -722,6 +726,13 @@ def _run(args, save_dir, records) -> None:
                     augment=(temporal_augmented or coordinate_augmented) and split == "train",
                     augmentation_config=temporal_augmentation_config,
                 )
+                if (args.model_variant == "body-local-hand-ctr-wide-relative"
+                        and dataset.data.shape[1] != 8):
+                    raise ValueError(
+                        "body-local-hand-ctr-wide-relative now requires the eight-channel "
+                        "cross-hand-distance-direction cache. Run tools/preprocess_torso_relative_npy.py "
+                        "with --cross-hand-distance into a new output directory."
+                    )
                 if dataset.data.shape[2] != args.window_size:
                     raise ValueError(
                         f"预处理窗口 T={dataset.data.shape[2]} 与 --window-size={args.window_size} 不一致"

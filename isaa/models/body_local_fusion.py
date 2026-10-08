@@ -49,14 +49,15 @@ class LocalSTBlock(nn.Module):
 
 
 class BodyLocalFusion(nn.Module):
-    ARCHITECTURE = "rtmw_ctr22_st48_handface_v1"
+    ARCHITECTURE = "rtmw_ctr22_st48_handface_torso_relative_v2"
     BODY_INDICES = tuple(i for i in RTMW_32_NODE_INDICES
                          if i not in {95, 99, 103, 107, 111, 116, 120, 124, 128, 132})
     HAND_INDICES = tuple(range(91, 133))
     CHANNELS = (48, 48, 48, 48, 96, 96, 96, 192, 192, 192)
     LOCAL_CHANNELS = (24, 24, 48, 48)
     LOCAL_STRIDES = (1,)
-    LOCAL_COORDINATE_MODE = "raw"
+    # Hand and face nodes share the same torso-centered x/y reference.
+    LOCAL_COORDINATE_MODE = "torso_relative"
 
     def __init__(self, num_classes: int = 120, body_channels=None, local_channels=None):
         super().__init__()
@@ -107,15 +108,16 @@ class BodyLocalFusion(nn.Module):
     def forward(self, x, valid_frame_mask=None):
         if x.ndim == 4:
             x = x.unsqueeze(-1)
-        if x.ndim != 5 or x.shape[1] != 3 or x.shape[3] != 133:
-            raise ValueError("Expected B x 3 x T x 133 x M RTMW input")
+        if x.ndim != 5 or x.shape[1] not in (3, 5, 8) or x.shape[3] != 133:
+            raise ValueError("Expected B x 3/5/8 x T x 133 x M RTMW input")
         b, c, t, _, m = x.shape
-        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(1, keepdim=True)
+        raw = x[:, :3]
+        mask = (raw[:, 2:3] > 0) & torch.isfinite(raw).all(1, keepdim=True)
         if valid_frame_mask is not None:
             mask &= valid_frame_mask[:, None, :, None, None].bool()
         x = x.permute(0, 4, 1, 2, 3).reshape(b*m, c, t, 133).masked_fill(~mask.permute(0,4,1,2,3).reshape(b*m,1,t,133), 0)
         mask = mask.permute(0,4,1,2,3).reshape(b*m,1,t,133)
-        body = x.index_select(-1, self.body_indices)
+        body = x[:, :3].index_select(-1, self.body_indices)
         bm = mask.index_select(-1, self.body_indices)
         norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
             b*m, 3*len(self.BODY_INDICES), t, 1)
@@ -124,8 +126,10 @@ class BodyLocalFusion(nn.Module):
         body = body.reshape(b*m,3,len(self.BODY_INDICES),t).permute(0,1,3,2)
         for block in self.body_blocks:
             body, bm = block(body, bm)
-        local_source = x
-        if self.LOCAL_COORDINATE_MODE == "torso_relative":
+        # Five-channel NPY files already carry torso-relative x/y in channels
+        # 3:5. Use them directly for both hands and face tokens.
+        local_source = torch.cat((x[:, 3:5], x[:, 2:3]), dim=1) if c in (5, 8) else x[:, :3]
+        if c == 3 and self.LOCAL_COORDINATE_MODE == "torso_relative":
             torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
             torso_points = x[:, :2].index_select(-1, torso_indices)
             torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
@@ -161,6 +165,7 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
 
     ARCHITECTURE = "rtmw_ctr22_handctr21_facest48_torso_relative_v1"
     HAND_CHANNELS = (24, 24, 48, 48)
+    HAND_INPUT_CHANNELS = 3
 
     def __init__(self, num_classes: int = 120):
         super().__init__(num_classes=num_classes)
@@ -171,7 +176,7 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         hand_graph = hand_graph / hand_graph.sum(-1, keepdim=True).clamp_min(1)
         # One shared module is applied to the left and right hand separately.
         self.hand_ctr_blocks = nn.ModuleList()
-        cin = 3
+        cin = self.HAND_INPUT_CHANNELS
         for cout in self.HAND_CHANNELS:
             self.hand_ctr_blocks.append(CTRGCNBlock(cin, cout, hand_graph, stride=1, residual=cin != 3 or cout != 3))
             cin = cout
@@ -202,17 +207,18 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
     def forward(self, x, valid_frame_mask=None):
         if x.ndim == 4:
             x = x.unsqueeze(-1)
-        if x.ndim != 5 or x.shape[1] != 3 or x.shape[3] != 133:
-            raise ValueError("Expected B x 3 x T x 133 x M RTMW input")
+        if x.ndim != 5 or x.shape[1] not in (3, 5, 8) or x.shape[3] != 133:
+            raise ValueError("Expected B x 3/5/8 x T x 133 x M RTMW input")
         b, c, t, _, m = x.shape
-        mask = (x[:, 2:3] > 0) & torch.isfinite(x).all(1, keepdim=True)
+        raw = x[:, :3]
+        mask = (raw[:, 2:3] > 0) & torch.isfinite(raw).all(1, keepdim=True)
         if valid_frame_mask is not None:
             mask &= valid_frame_mask[:, None, :, None, None].bool()
         x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, 133)
         mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, 133)
         x = x.masked_fill(~mask, 0)
 
-        body = x.index_select(-1, self.body_indices)
+        body = x[:, :3].index_select(-1, self.body_indices)
         bm = mask.index_select(-1, self.body_indices)
         norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
             b * m, 3 * len(self.BODY_INDICES), t, 1)
@@ -222,15 +228,29 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         for block in self.body_blocks:
             body, bm = block(body, bm)
 
-        torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
-        torso_points = x[:, :2].index_select(-1, torso_indices)
-        torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
-        torso_center = (torso_points * torso_mask).sum(-1, keepdim=True) / torso_mask.sum(-1, keepdim=True).clamp_min(1)
-        local_source = x.clone()
-        local_source[:, :2] = local_source[:, :2] - torso_center
+        if c in (5, 8):
+            # Preprocessed files store torso-relative x/y in channels 3:5.
+            local_source = torch.cat((x[:, 3:5], x[:, 2:3]), dim=1)
+        else:
+            torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
+            torso_points = x[:, :2].index_select(-1, torso_indices)
+            torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
+            torso_center = (torso_points * torso_mask).sum(-1, keepdim=True) / torso_mask.sum(-1, keepdim=True).clamp_min(1)
+            local_source = x[:, :3].clone()
+            local_source[:, :2] = local_source[:, :2] - torso_center
 
-        hand0 = local_source[..., 91:112]
-        hand1 = local_source[..., 112:133]
+        if self.HAND_INPUT_CHANNELS == 6 and c == 8:
+            hand_features = torch.cat((x[:, 3:5], x[:, 2:3], x[:, 5:8]), dim=1)
+        else:
+            hand_features = local_source
+        if self.HAND_INPUT_CHANNELS == 6 and hand_features.shape[1] == 3:
+            raise ValueError(
+                "body-local-hand-ctr-wide-relative requires eight-channel data with "
+                "precomputed cross-hand distance and direction; use the crosshand-distance-direction NPY cache"
+            )
+        hand_source = hand_features
+        hand0 = hand_source[..., 91:112]
+        hand1 = hand_source[..., 112:133]
         hm0 = mask[..., 91:112]
         hm1 = mask[..., 112:133]
         hand0, hm0 = self._run_hand(hand0, hm0)
@@ -284,8 +304,9 @@ class BodyLocalHandCTRWideRelativeFusion(BodyLocalHandCTRRelativeFusion):
     branch and classifier contract remain unchanged.
     """
 
-    ARCHITECTURE = "rtmw_ctr22_handctr21_wide_facest48_torso_relative_v1"
+    ARCHITECTURE = "rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_torso_relative_v3"
     HAND_CHANNELS = (32, 32, 64, 64, 96, 96)
+    HAND_INPUT_CHANNELS = 6
 
 
 class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
