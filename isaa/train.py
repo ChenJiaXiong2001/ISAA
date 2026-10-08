@@ -171,6 +171,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--console-only", action="store_true",
                         help="Keep training output on the terminal without creating console.log")
     args = parser.parse_args()
+    if args.npy_dir:
+        print("warning: --npy-dir is deprecated; all training now streams raw samples from --archive in memory", file=sys.stderr)
+        args.npy_dir = None
     if args.ablation_stage is not None:
         stage = _IMPLEMENTED_ABLATION_STAGES[args.ablation_stage]
         expected_nodes = int(stage["node_count"])

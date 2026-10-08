@@ -241,12 +241,40 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
 
         if self.HAND_INPUT_CHANNELS == 6 and c == 8:
             hand_features = torch.cat((x[:, 3:5], x[:, 2:3], x[:, 5:8]), dim=1)
+        elif self.HAND_INPUT_CHANNELS == 6 and c == 3:
+            # Derive cross-hand distance and direction from raw ZIP samples
+            # on the fly; no six/eight-channel dataset cache is required.
+            torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
+            torso_xy = x[:, :2].index_select(-1, torso_indices)
+            torso_valid = mask.index_select(-1, torso_indices).to(x.dtype)
+            shoulder_w = torso_valid[..., :2]
+            hip_w = torso_valid[..., 2:]
+            shoulder = (torso_xy[..., :2] * shoulder_w).sum(-1) / shoulder_w.sum(-1).clamp_min(1)
+            hip = (torso_xy[..., 2:] * hip_w).sum(-1) / hip_w.sum(-1).clamp_min(1)
+            torso_scale = torch.linalg.vector_norm(shoulder - hip, dim=1).clamp_min(1e-3)
+
+            left = local_source[..., 91:112]
+            right = local_source[..., 112:133]
+            pair_valid = mask[..., 91:112] & mask[..., 112:133]
+            pair_vector = right[:, :2] - left[:, :2]
+            pair_distance = torch.linalg.vector_norm(pair_vector, dim=1)
+            distance = (pair_distance / torso_scale[..., None]) * pair_valid[:, 0].to(x.dtype)
+            unit_direction = pair_vector / pair_distance[:, None].clamp_min(1e-6)
+            unit_direction = unit_direction * pair_valid.to(x.dtype)
+
+            distance_all = x.new_zeros((b * m, 1, t, 133))
+            direction_all = x.new_zeros((b * m, 2, t, 133))
+            distance_all[..., 91:112] = distance[:, None]
+            distance_all[..., 112:133] = distance[:, None]
+            direction_all[..., 91:112] = unit_direction
+            direction_all[..., 112:133] = -unit_direction
+            hand_features = torch.cat((local_source, distance_all, direction_all), dim=1)
         else:
             hand_features = local_source
         if self.HAND_INPUT_CHANNELS == 6 and hand_features.shape[1] == 3:
             raise ValueError(
-                "body-local-hand-ctr-wide-relative requires eight-channel data with "
-                "precomputed cross-hand distance and direction; use the crosshand-distance-direction NPY cache"
+                "body-local-hand-ctr-wide-relative requires raw x/y/score or "
+                "an eight-channel distance-direction feature tensor"
             )
         hand_source = hand_features
         hand0 = hand_source[..., 91:112]
@@ -347,8 +375,8 @@ class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
     def forward(self, x, valid_frame_mask=None):
         if x.ndim == 4:
             x = x.unsqueeze(-1)
-        if x.ndim != 5 or x.shape[1] != 5 or x.shape[3] != 133:
-            raise ValueError("Expected B x 5 x T x 133 x M RTMW input with precomputed relative xy")
+        if x.ndim != 5 or x.shape[1] not in (3, 5, 8) or x.shape[3] != 133:
+            raise ValueError("Expected B x 3/5/8 x T x 133 x M RTMW input")
         b, c, t, _, m = x.shape
         mask = (x[:, 2:3] > 0) & torch.isfinite(x[:, :3]).all(1, keepdim=True)
         if valid_frame_mask is not None:
@@ -367,8 +395,15 @@ class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
         for block in self.body_blocks:
             body, bm = block(body, bm)
 
-        local_source = torch.cat((x[:, 3:5], x[:, 2:3]), dim=1)
-
+        if c in (5, 8):
+            local_source = torch.cat((x[:, 3:5], x[:, 2:3]), dim=1)
+        else:
+            torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
+            torso_points = x[:, :2].index_select(-1, torso_indices)
+            torso_mask = mask.to(x.dtype).index_select(-1, torso_indices)
+            torso_center = (torso_points * torso_mask).sum(-1, keepdim=True) / torso_mask.sum(-1, keepdim=True).clamp_min(1)
+            local_source = x[:, :3].clone()
+            local_source[:, :2] = local_source[:, :2] - torso_center
         hand_indices = torch.tensor(self.HAND_INDICES, device=x.device)
         hands = local_source.index_select(-1, hand_indices)
         hm = mask.index_select(-1, hand_indices)
