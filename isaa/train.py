@@ -120,7 +120,7 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default="body-local",
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
                         help="Default: BodyLocalFusion; isaa/original are legacy explicit comparison models")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
