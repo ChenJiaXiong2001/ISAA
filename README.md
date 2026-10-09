@@ -168,6 +168,9 @@ BodyLocalFusion 的结构配置如下：
 | body-local-dropout | 分支融合 dropout 对照 | 已实现，结果待补 |
 | body-local-relative | 局部支路使用躯干相对坐标 | 已实现，结果待补 |
 | body-local-relative-split | 手部和面部拆分为独立局部分支 | 已实现，结果待补 |
+| body-local-hand-ctr-wide-relative-routed | 在宽通道手部 CTR-GCN 上加入动作阶段与骨架质量感知的手部/面部门控 | 已实现，结果待补 |
+
+`body-local-hand-ctr-wide-relative-routed` 保持宽通道手部 CTR-GCN、躯干相对坐标以及跨手距离/方向特征，在手部和面部 ST-GCN 的逐帧融合前加入可微的阶段与质量门控，并可通过 `return_routing=True` 导出手部、面部 gate 和质量统计。原始 ZIP 输入会在线构造这些局部特征，八通道 NPY 也可直接使用。当前实现是 soft routing，局部分支仍会执行完整前向；真实的 hard conditional compute 需要后续按时间段 gather 后再测量 FLOPs 和延迟。
 | body-local-time-aug | 时间增强 | 已实现，结果待补 |
 | body-local-coord-aug | 坐标噪声增强 | 已实现，结果待补 |
 | body-local-full | 更大局部分支容量 | 已实现，结果待补 |

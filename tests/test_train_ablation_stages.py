@@ -35,6 +35,13 @@ class AblationStageArgumentTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parse_args()
 
+    def test_wide_relative_routed_variant_is_registered(self):
+        with patch.object(sys, "argv", ["main.py", "--model-variant",
+                                         "body-local-hand-ctr-wide-relative-routed"]):
+            args = parse_args()
+        self.assertEqual(args.model_variant,
+                         "body-local-hand-ctr-wide-relative-routed")
+
 
 if __name__ == "__main__":
     unittest.main()

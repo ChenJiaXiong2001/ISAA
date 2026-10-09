@@ -337,6 +337,261 @@ class BodyLocalHandCTRWideRelativeFusion(BodyLocalHandCTRRelativeFusion):
     HAND_INPUT_CHANNELS = 6
 
 
+class BodyLocalHandCTRWideRelativeRoutedFusion(BodyLocalHandCTRWideRelativeFusion):
+    """Stage- and quality-aware fusion for the wide hand CTR baseline.
+
+    This keeps the proven eight-channel torso-relative input and the wide shared
+    hand CTR-GCN backbone, but replaces the fixed ``(hand + face) / 2`` fusion
+    with independent per-frame gates.  The gates use cheap motion, pose,
+    validity and confidence statistics together with the torso representation.
+    The current implementation is a differentiable soft router; it is
+    intentionally a drop-in research model before adding hard conditional
+    execution and preserves the parent model's tensor/classifier contract.
+    """
+
+    ARCHITECTURE = "rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_stage_quality_gate_v2"
+    ROUTER_WIDTH = 32
+
+    def __init__(self, num_classes: int = 120):
+        super().__init__(num_classes=num_classes)
+        body_dim = self.CHANNELS[-1]
+        local_dim = self.LOCAL_CHANNELS[-1]
+        # A temporal router context makes the gate depend on the local action
+        # stage rather than only on an individual frame.
+        self.route_body = nn.Sequential(
+            nn.Conv1d(body_dim, self.ROUTER_WIDTH, 3, padding=1), nn.ReLU()
+        )
+        self.route_hand = nn.Linear(local_dim, self.ROUTER_WIDTH)
+        self.route_face = nn.Linear(local_dim, self.ROUTER_WIDTH)
+        # body, local feature, motion, pose, quality, valid ratio, cross-hand
+        # change, stage sin/cos and torso uncertainty = 32+32+7+2+1.
+        route_dim = self.ROUTER_WIDTH * 3 + 7 + 2 + 1
+        self.hand_router = nn.Sequential(
+            nn.Linear(route_dim, self.ROUTER_WIDTH), nn.ReLU(),
+            nn.Linear(self.ROUTER_WIDTH, 1),
+        )
+        self.face_router = nn.Sequential(
+            nn.Linear(route_dim, self.ROUTER_WIDTH), nn.ReLU(),
+            nn.Linear(self.ROUTER_WIDTH, 1),
+        )
+        self.coarse_classifier = nn.Linear(body_dim, num_classes)
+        # Start close to the parent model's equal-weight fusion.
+        nn.init.constant_(self.hand_router[-1].bias, 4.0)
+        nn.init.constant_(self.face_router[-1].bias, 4.0)
+
+    @staticmethod
+    def _temporal_abs_diff(x: torch.Tensor) -> torch.Tensor:
+        diff = torch.zeros_like(x)
+        if x.shape[2] > 1:
+            diff[:, :, 1:] = (x[:, :, 1:] - x[:, :, :-1]).abs()
+        return diff
+
+    @staticmethod
+    def _region_statistics(coords: torch.Tensor, mask: torch.Tensor,
+                           confidence: torch.Tensor | None = None):
+        """Return motion, pose, quality, valid ratio and valid-frame mask."""
+        # coords: [BM, 2, T, V], mask: [BM, 1, T, V]
+        w = mask.to(coords.dtype)
+        count = w.sum(-1).squeeze(1)
+        valid = count > 0
+        pair = torch.zeros_like(mask, dtype=coords.dtype)
+        if coords.shape[2] > 1:
+            pair[:, :, 1:] = (mask[:, :, 1:] & mask[:, :, :-1]).to(coords.dtype)
+        diff = torch.zeros_like(coords)
+        if coords.shape[2] > 1:
+            diff[:, :, 1:] = (coords[:, :, 1:] - coords[:, :, :-1]).abs()
+        motion_sum = (diff * pair).sum((1, 3))
+        pair_count = pair.sum((1, 3))
+        motion = motion_sum / pair_count.clamp_min(1)
+        pose = (coords.abs() * w).sum((1, 3)) / count.clamp_min(1)
+        if confidence is None:
+            quality = count / max(1, coords.shape[-1])
+        else:
+            quality = (confidence * w).sum(-1).squeeze(1) / count.clamp_min(1)
+        return motion, pose, quality, count / max(1, coords.shape[-1]), valid
+
+    def forward(self, x, valid_frame_mask=None, return_routing: bool = False):
+        if x.ndim == 4:
+            x = x.unsqueeze(-1)
+        if x.ndim != 5 or x.shape[1] not in (3, 8) or x.shape[3] != 133:
+            raise ValueError(
+                "Expected B x 3 or B x 8 x T x 133 x M RTMW input"
+            )
+        b, c, t, _, m = x.shape
+        raw = x[:, :3]
+        mask = (raw[:, 2:3] > 0) & torch.isfinite(raw).all(1, keepdim=True)
+        if valid_frame_mask is not None:
+            mask &= valid_frame_mask[:, None, :, None, None].bool()
+        x = x.permute(0, 4, 1, 2, 3).reshape(b * m, c, t, 133)
+        mask = mask.permute(0, 4, 1, 2, 3).reshape(b * m, 1, t, 133)
+        x = x.masked_fill(~mask, 0)
+
+        body = x[:, :3].index_select(-1, self.body_indices)
+        bm = mask.index_select(-1, self.body_indices)
+        norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
+            b * m, 3 * len(self.BODY_INDICES), t, 1)
+        body = self.body_input_norm(body.permute(0, 1, 3, 2).reshape(
+            b * m, 3 * len(self.BODY_INDICES), t, 1), norm_mask)
+        body = body.reshape(b * m, 3, len(self.BODY_INDICES), t).permute(0, 1, 3, 2)
+        for block in self.body_blocks:
+            body, bm = block(body, bm)
+
+        if c == 8:
+            # Preprocessed files store torso-relative x/y plus cross-hand
+            # distance and direction in channels 3:8.
+            local_source = torch.cat((x[:, 3:5], x[:, 2:3]), dim=1)
+            hand_features = torch.cat((x[:, 3:5], x[:, 2:3], x[:, 5:8]), dim=1)
+        else:
+            # Raw ZIP samples are supported as well; derive the same six
+            # local hand features online so routed training uses the current
+            # streaming data path without a derived cache.
+            torso_indices = torch.tensor((5, 6, 11, 12), device=x.device)
+            torso_xy = x[:, :2].index_select(-1, torso_indices)
+            torso_valid = mask.index_select(-1, torso_indices).to(x.dtype)
+            shoulder_w = torso_valid[..., :2]
+            hip_w = torso_valid[..., 2:]
+            shoulder = (torso_xy[..., :2] * shoulder_w).sum(-1) / shoulder_w.sum(-1).clamp_min(1)
+            hip = (torso_xy[..., 2:] * hip_w).sum(-1) / hip_w.sum(-1).clamp_min(1)
+            torso_center = (torso_xy * torso_valid).sum(-1, keepdim=True) / torso_valid.sum(-1, keepdim=True).clamp_min(1)
+            local_source = x[:, :3].clone()
+            local_source[:, :2] = local_source[:, :2] - torso_center
+            torso_scale = torch.linalg.vector_norm(shoulder - hip, dim=1).clamp_min(1e-3)
+            left = local_source[..., 91:112]
+            right = local_source[..., 112:133]
+            pair_valid = mask[..., 91:112] & mask[..., 112:133]
+            pair_vector = right[:, :2] - left[:, :2]
+            pair_distance = torch.linalg.vector_norm(pair_vector, dim=1)
+            distance = (pair_distance / torso_scale[..., None]) * pair_valid[:, 0].to(x.dtype)
+            unit_direction = pair_vector / pair_distance[:, None].clamp_min(1e-6)
+            unit_direction = unit_direction * pair_valid.to(x.dtype)
+            distance_all = x.new_zeros((b * m, 1, t, 133))
+            direction_all = x.new_zeros((b * m, 2, t, 133))
+            distance_all[..., 91:112] = distance[:, None]
+            distance_all[..., 112:133] = distance[:, None]
+            direction_all[..., 91:112] = unit_direction
+            direction_all[..., 112:133] = -unit_direction
+            hand_features = torch.cat((local_source, distance_all, direction_all), dim=1)
+        hand0 = hand_features[..., 91:112]
+        hand1 = hand_features[..., 112:133]
+        hm0 = mask[..., 91:112]
+        hm1 = mask[..., 112:133]
+        hand0, hm0 = self._run_hand(hand0, hm0)
+        hand1, hm1 = self._run_hand(hand1, hm1)
+        hand0 = self.hand_to_local(hand0)
+        hand1 = self.hand_to_local(hand1)
+        hand_t0, hand_valid0 = self._pool_nodes_per_frame(hand0, hm0)
+        hand_t1, hand_valid1 = self._pool_nodes_per_frame(hand1, hm1)
+        hand_t = (hand_t0 + hand_t1) * 0.5
+        hand_valid = hand_valid0 | hand_valid1
+
+        fidx = self.face_indices.flatten().to(x.device)
+        fx = local_source.index_select(-1, fidx).reshape(b * m, 3, t, 6, 12)
+        fm = mask.index_select(-1, fidx).reshape(b * m, 1, t, 6, 12)
+        fm = fm & self.face_members.to(x.device)[None, None, None]
+        fc = fm.sum(-1)
+        face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
+        face_mask = fc > 0
+        for block in self.face_st_blocks:
+            face, face_mask = block(face, face_mask)
+        face_t, face_valid = self._pool_nodes_per_frame(face, face_mask)
+
+        body_t, body_valid = self._pool_nodes_per_frame(body, bm)
+        target_t = body_t.shape[1]
+        if hand_t.shape[1] != target_t:
+            hand_t = F.interpolate(hand_t.transpose(1, 2), size=target_t,
+                                   mode="linear", align_corners=False).transpose(1, 2)
+            hand_valid = F.interpolate(hand_valid[:, None].float(), size=target_t,
+                                       mode="nearest")[:, 0].bool()
+        if face_t.shape[1] != target_t:
+            face_t = F.interpolate(face_t.transpose(1, 2), size=target_t,
+                                   mode="linear", align_corners=False).transpose(1, 2)
+            face_valid = F.interpolate(face_valid[:, None].float(), size=target_t,
+                                       mode="nearest")[:, 0].bool()
+        if body_t.shape[1] != target_t:
+            raise RuntimeError("Body pooling unexpectedly changed the target time length")
+
+        # Compute cheap routing descriptors at the original time resolution and
+        # interpolate them to the torso feature resolution.
+        hand_indices = torch.tensor(self.HAND_INDICES, device=x.device)
+        hand_coords = local_source[:, :2].index_select(-1, hand_indices)
+        hand_mask = mask.index_select(-1, hand_indices)
+        hand_confidence = local_source[:, 2:3].index_select(-1, hand_indices)
+        hmotion, hpose, hquality, hvalid_ratio, hframe_valid = self._region_statistics(
+            hand_coords, hand_mask, hand_confidence
+        )
+        face_coords = face.new_zeros((b * m, 2, t, 6))
+        face_raw_mask = fm
+        face_coords = face_raw_mask.to(x.dtype).mul(fx[:, :2]).sum(-1) / fc.clamp_min(1)
+        face_region_mask = (fc > 0).to(mask.dtype)
+        face_confidence = fx[:, 2:3].mul(fm.to(x.dtype)).sum(-1) / fc.clamp_min(1)
+        fmotion, fpose, fquality, fvalid_ratio, fframe_valid = self._region_statistics(
+            face_coords, face_region_mask, face_confidence
+        )
+        # Channel 3 of the six-channel hand tensor is the shared cross-hand
+        # distance, regardless of whether it came from an eight-channel cache
+        # or was derived online from raw three-channel input.
+        cross_distance = hand_features[:, 3:4, :, 91:133]
+        cross_change = self._temporal_abs_diff(cross_distance).mean((1, 3))
+        coarse_logits = self.coarse_classifier(body_t.detach())
+        coarse_prob = coarse_logits.softmax(-1)
+        uncertainty = -(coarse_prob.clamp_min(1e-8) * coarse_prob.clamp_min(1e-8).log()).sum(-1, keepdim=True)
+
+        def resize_descriptor(value):
+            return F.interpolate(value[:, None, :], size=target_t,
+                                 mode="linear", align_corners=False)[:, 0]
+
+        hm = resize_descriptor(hmotion)
+        hp = resize_descriptor(hpose)
+        hq = resize_descriptor(hquality)
+        hvr = resize_descriptor(hframe_valid.float())
+        fm = resize_descriptor(fmotion)
+        fp = resize_descriptor(fpose)
+        fq = resize_descriptor(fquality)
+        fvr = resize_descriptor(fframe_valid.float())
+        cd = resize_descriptor(cross_change)
+        phase = torch.linspace(0, 1, target_t, device=x.device, dtype=x.dtype)
+        phase = phase[None, :, None].expand(b * m, -1, -1)
+        phase_features = torch.cat((torch.sin(phase * 2 * math.pi),
+                                    torch.cos(phase * 2 * math.pi)), dim=-1)
+        body_route = self.route_body(body_t.transpose(1, 2)).transpose(1, 2)
+        hand_route = self.route_hand(hand_t)
+        face_route = self.route_face(face_t)
+        common = torch.cat((body_route, hand_route, face_route,
+                            phase_features, uncertainty), dim=-1)
+        hand_input = torch.cat((common, hm[..., None], hp[..., None], hq[..., None],
+                                hvr[..., None], cd[..., None],
+                                torch.zeros_like(cd[..., None]),
+                                torch.zeros_like(cd[..., None])), dim=-1)
+        face_input = torch.cat((common, fm[..., None], fp[..., None], fq[..., None],
+                                fvr[..., None], torch.zeros_like(cd[..., None]),
+                                cd[..., None], torch.zeros_like(cd[..., None])), dim=-1)
+        # The seven scalar slots are motion, pose, quality, valid ratio,
+        # hand/face cross-distance change and a reserved compatibility slot.
+        hand_gate = torch.sigmoid(self.hand_router(hand_input).squeeze(-1))
+        face_gate = torch.sigmoid(self.face_router(face_input).squeeze(-1))
+        hand_gate = hand_gate * hand_valid.to(hand_gate.dtype) * hvr
+        face_gate = face_gate * face_valid.to(face_gate.dtype) * fvr
+        local_t = 0.5 * (hand_gate.unsqueeze(-1) * hand_t +
+                         face_gate.unsqueeze(-1) * face_t)
+        local_valid = hand_valid | face_valid
+        local_t = local_t * local_valid.unsqueeze(-1).to(local_t.dtype)
+        bv = self.body_projection(body_t.reshape(b, m, target_t, -1).mean(1).mean(1))
+        lv = self.local_projection(
+            local_t.reshape(b, m, target_t, -1).mean(1).mean(1)
+        )
+        logits = self.classifier(torch.cat((bv, lv), dim=1))
+        if not return_routing:
+            return logits
+        return {
+            "logits": logits,
+            "hand_gate": hand_gate.reshape(b, m, target_t).mean(1),
+            "face_gate": face_gate.reshape(b, m, target_t).mean(1),
+            "hand_quality": hq.reshape(b, m, target_t).mean(1),
+            "face_quality": fq.reshape(b, m, target_t).mean(1),
+            "coarse_uncertainty": uncertainty.reshape(b, m, target_t).mean(1),
+        }
+
+
 class BodyLocalRelativeSplitFusion(BodyLocalRelativeFusion):
     """Relative-coordinate model with independent hand and face ST-GCNs."""
 
