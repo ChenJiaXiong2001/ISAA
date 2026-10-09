@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 import time
@@ -19,21 +20,26 @@ if str(PROJECT_ROOT) not in sys.path:
 def _prefer_bundled_cuda_libraries() -> None:
     """Make the PyTorch wheel's CUDA libraries win over system CUDA paths.
 
-    The server also has CUDA 12.5/cuDNN 9.3 installed under ``/usr/local``.
-    PyTorch 2.14.0+cu126 requires its bundled cuDNN 9.10.2, and an inherited
-    ``LD_LIBRARY_PATH`` can otherwise make the first cuDNN load fail before
-    training starts.  Set this before importing torch so every train launch,
-    including nohup/queued launches, resolves the compatible libraries.
+    The server also has a system CUDA/cuDNN installation under ``/usr/local``.
+    PyTorch wheels ship a matching runtime beside the installed ``torch``
+    package, which may be in a user site directory rather than ``sys.prefix``.
+    Resolve that package location before importing torch so every train launch,
+    including nohup/queued launches, uses the compatible libraries.
     """
     if not sys.platform.startswith("linux"):
         return
     py_tag = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    nvidia_root = Path(sys.prefix) / "lib" / py_tag / "site-packages" / "nvidia"
-    bundled = [
-        nvidia_root / "cudnn" / "lib",
-        nvidia_root / "cublas" / "lib",
-        nvidia_root / "cuda_runtime" / "lib",
-    ]
+    nvidia_roots = [Path(sys.prefix) / "lib" / py_tag / "site-packages" / "nvidia"]
+    torch_spec = importlib.util.find_spec("torch")
+    if torch_spec is not None and torch_spec.origin:
+        torch_site = Path(torch_spec.origin).resolve().parent.parent
+        nvidia_roots.insert(0, torch_site / "nvidia")
+    bundled = []
+    for nvidia_root in nvidia_roots:
+        for package in ("cudnn", "cublas", "cuda_runtime", "cu12", "cu13"):
+            path = nvidia_root / package / "lib"
+            if path.is_dir() and path not in bundled:
+                bundled.append(path)
     bundled = [path for path in bundled if path.is_dir()]
     if not bundled:
         return
@@ -45,7 +51,7 @@ def _prefer_bundled_cuda_libraries() -> None:
         if path
         and "/usr/local/cuda" not in path
         and "/usr/local/lib64" not in path
-        and "cudnn" not in path.lower()
+        and "/nvidia/" not in path.lower()
     ]
     desired = ":".join([str(path) for path in bundled] + filtered)
     # The dynamic loader reads LD_LIBRARY_PATH before Python starts.  Re-exec
