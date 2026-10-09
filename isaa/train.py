@@ -689,10 +689,20 @@ def _run(args, save_dir, records) -> None:
 
     if not hasattr(torch, "compile"):
         raise RuntimeError("torch.compile is required in this project, but this PyTorch has no torch.compile")
+    # CTR-GCN blocks keep their temporal stride as an integer module
+    # attribute.  Without this option TorchDynamo specializes the same
+    # forward graph repeatedly for stride variants until recompile_limit is
+    # reached, which makes the first epoch unnecessarily slow.
+    dynamo_config = getattr(getattr(torch, "_dynamo", None), "config", None)
+    allow_unspec_int = False
+    if dynamo_config is not None and hasattr(dynamo_config, "allow_unspec_int_on_nn_module"):
+        dynamo_config.allow_unspec_int_on_nn_module = True
+        allow_unspec_int = True
     compile_enabled = True
     print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
     train_model = torch.compile(model, mode=args.compile_mode)
-    records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode})
+    records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode,
+                                   "allow_unspec_int_on_nn_module": allow_unspec_int})
 
     archive = Path(args.archive)
     if not archive.is_absolute():
