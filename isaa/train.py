@@ -154,6 +154,8 @@ def parse_args() -> argparse.Namespace:
                         help="Use native BatchNorm2d for the legacy ISAA main-only model")
     parser.add_argument("--compile-mode", choices=("default", "reduce-overhead", "max-autotune"),
                         default="reduce-overhead")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use torch.compile; --no-compile skips first-batch graph compilation")
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--nesterov", action=argparse.BooleanOptionalAction, default=True)
@@ -687,20 +689,24 @@ def _run(args, save_dir, records) -> None:
                       f"finite={torch.isfinite(result['logits']).all().item()}")
         return
 
-    if not hasattr(torch, "compile"):
+    if args.compile and not hasattr(torch, "compile"):
         raise RuntimeError("torch.compile is required in this project, but this PyTorch has no torch.compile")
-    # CTR-GCN blocks keep their temporal stride as an integer module
-    # attribute.  Without this option TorchDynamo specializes the same
-    # forward graph repeatedly for stride variants until recompile_limit is
-    # reached, which makes the first epoch unnecessarily slow.
-    dynamo_config = getattr(getattr(torch, "_dynamo", None), "config", None)
+    compile_enabled = bool(args.compile)
     allow_unspec_int = False
-    if dynamo_config is not None and hasattr(dynamo_config, "allow_unspec_int_on_nn_module"):
-        dynamo_config.allow_unspec_int_on_nn_module = True
-        allow_unspec_int = True
-    compile_enabled = True
-    print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
-    train_model = torch.compile(model, mode=args.compile_mode)
+    if args.compile:
+        # CTR-GCN blocks keep their temporal stride as an integer module
+        # attribute.  Without this option TorchDynamo specializes the same
+        # forward graph repeatedly for stride variants until recompile_limit
+        # is reached, which makes the first epoch unnecessarily slow.
+        dynamo_config = getattr(getattr(torch, "_dynamo", None), "config", None)
+        if dynamo_config is not None and hasattr(dynamo_config, "allow_unspec_int_on_nn_module"):
+            dynamo_config.allow_unspec_int_on_nn_module = True
+            allow_unspec_int = True
+        print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
+        train_model = torch.compile(model, mode=args.compile_mode)
+    else:
+        print("compile: disabled (--no-compile); running eager model", flush=True)
+        train_model = model
     records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode,
                                    "allow_unspec_int_on_nn_module": allow_unspec_int})
 
