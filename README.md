@@ -9,8 +9,10 @@ ISAA 当前默认模型是 **BodyLocalFullGCNFusion**（`body-local-hand-ctr-wid
 完整版本的骨干独立存放于 `isaa/models/backbones/ctrgcn.py` 与 `isaa/models/backbones/stgcn.py`，按需导入、调整参数和微调。分支配置见 `configs/full_gcn.json`，接口及训练说明见 [完整 GCN 文档](docs/full_gcn.md)。
 
 ```bash
-python main.py --gcn-config configs/full_gcn.json --device cuda
+python train_full_gcn.py --device cuda
 ```
+
+`train_full_gcn.py` 提供完整 GCN 的 NTU60 XSub 训练预设，默认关闭 torch.compile，输出保存到 `outputs/full_gcn_ntu60_xsub/`。可传入 `--compile` 开启编译，或通过 `--gcn-config` 调整各分支。
 
 下方 89.60% 为历史 BodyLocalFusion 实验结果，不是当前最佳。旧模型通过显式 `--model-variant` 运行。
 
@@ -81,7 +83,7 @@ RTMDet-tiny 负责正常样本，原始质量检查失败样本使用 YOLO26-X �
 | 学习率衰减 | 零基轮次 35、55 |
 | 随机种子 | 1 |
 | cuDNN | 强制开启 |
-| torch.compile | 强制开启 |
+| torch.compile | main.py 默认开启；完整 GCN 专用入口默认关闭，可通过参数调整 |
 | DataLoader workers | 8 |
 
 BodyLocalFusion 不使用 32 点输入。32 点 main-only CTR-GCN 已降为显式的历史对照模型。
