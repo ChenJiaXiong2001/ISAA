@@ -2,18 +2,29 @@
 
 **Interpretable Skeleton-Based Action Analysis / 基于骨架的可解释动作分析**
 
-ISAA 当前默认主线是 **BodyLocalFusion**，也是当前已有完整训练记录且效果最好的动作识别 Baseline。
+ISAA 当前默认模型是 **BodyLocalFullGCNFusion**（`body-local-hand-ctr-wide-relative-full`）：以当前最佳 wide-relative 模型为基础，把身体、双手和面部 GCN 升级为独立可复用的完整骨干。
+
+当前最佳已训练模型是 `body-local-hand-ctr-wide-relative`：NTU60 XSub 原训练 Top-1 **93.0823%**，统一复测 **93.0946%**。最新 routed 模型复测为 92.2912%。完整版本尚未全量训练，其准确率待验证。结果依据见 `outputs/evaluations/baseline_vs_routed/report.md`。
+
+完整版本的骨干独立存放于 `isaa/models/backbones/ctrgcn.py` 与 `isaa/models/backbones/stgcn.py`，按需导入、调整参数和微调。分支配置见 `configs/full_gcn.json`，接口及训练说明见 [完整 GCN 文档](docs/full_gcn.md)。
+
+```bash
+python main.py --gcn-config configs/full_gcn.json --device cuda
+```
+
+下方 89.60% 为历史 BodyLocalFusion 实验结果，不是当前最佳。旧模型通过显式 `--model-variant` 运行。
 
 当前默认结构：
 
 ~~~text
 RTMW-133
-├── 身体 22 点 → 10 层 CTR-GCN
-├── 手部 42 点 + 面部 6 token → 4 层局部 ST-GCN
+├── 身体 22 点 → 完整 10 层 CTR-GCN（64/128/256）
+├── 双手共享 21 点 → 完整 10 层 CTR-GCN（64/128/256）
+├── 面部 6 token → 完整 10 层 ST-GCN（64/128/256）
 └── 身体特征与局部特征 → 有效位置池化 → 投影 → 拼接 → 分类
 ~~~
 
-已完成的 NTU60 XSub 实验结果：
+历史 BodyLocalFusion 的 NTU60 XSub 实验结果：
 
 | 指标 | 结果 |
 |---|---:|
@@ -25,7 +36,7 @@ RTMW-133
 | 训练 batch | 32 |
 | 随机种子 | 1 |
 
-训练集和验证集相差 9.24 个百分点，说明当前 Baseline 能够收敛，但存在明显过拟合。
+训练集和验证集相差 9.24 个百分点，说明历史 BodyLocalFusion 能够收敛，但存在明显过拟合。
 
 ## 项目定位
 
@@ -39,7 +50,7 @@ NTU RGB+D RGB 视频
 → 质量检查
 → YOLO26-X 修复困难样本
 → RTMW-133 骨架序列
-→ BodyLocalFusion 动作识别
+→ 完整 GCN 升级版动作识别
 → 身体、手部、面部和时间阶段分析
 ~~~
 
@@ -47,16 +58,17 @@ RTMDet-tiny 负责正常样本，原始质量检查失败样本使用 YOLO26-X �
 
 ## 当前默认训练设定
 
-默认运行入口已经切换到 BodyLocalFusion：
+默认运行入口已经切换到完整 GCN：
 
 | 项目 | 默认值 |
 |---|---|
-| 模型 | body-local |
+| 模型 | body-local-hand-ctr-wide-relative-full |
 | 数据划分 | NTU60 XSub |
 | 输入节点 | RTMW-133 |
-| 身体分支 | 22 点 CTR-GCN |
-| 局部分支 | 手部 42 点 + 面部 6 token ST-GCN |
-| 输入通道 | raw x/y/score |
+| 身体分支 | 22 点完整 CTR-GCN，10 层，64/128/256 |
+| 手部分支 | 双手共享 21 点完整 CTR-GCN，10 层，64/128/256 |
+| 面部分支 | 6 token 完整 ST-GCN，10 层，64/128/256 |
+| 输入通道 | ZIP raw x/y/score；在线生成相对坐标、跨手距离/方向 |
 | 时间窗口 | 64 帧 |
 | 最大人数 | 2 |
 | 训练轮数 | 65 |
@@ -74,7 +86,7 @@ RTMDet-tiny 负责正常样本，原始质量检查失败样本使用 YOLO26-X �
 
 BodyLocalFusion 不使用 32 点输入。32 点 main-only CTR-GCN 已降为显式的历史对照模型。
 
-## 运行当前 Baseline
+## 运行默认完整 GCN
 
 将 NTU60 的 RTMW-133 骨架 ZIP 命名为 `data/ntu60_skeletons_rtmw.zip` 后运行。默认数据协议是 xsub60；NTU120 数据必须显式设置 `--split xsub120` 和相应类别数：
 
@@ -82,11 +94,11 @@ BodyLocalFusion 不使用 32 点输入。32 点 main-only CTR-GCN 已降为显�
 python main.py
 ~~~
 
-也可以显式写出当前 Baseline 的关键参数：
+也可以显式写出完整 GCN 的关键参数：
 
 ~~~bash
 python main.py \
-  --model-variant body-local \
+  --model-variant body-local-hand-ctr-wide-relative-full \
   --feature-mode raw \
   --archive /path/to/ntu60_skeletons_rtmw.zip \
   --split xsub60 \
@@ -97,27 +109,13 @@ python main.py \
   --num-workers 8
 ~~~
 
-如果使用已经预处理的 NumPy 数据：
-
-~~~bash
-python main.py \
-  --model-variant body-local \
-  --feature-mode raw \
-  --npy-dir /path/to/ntu60_rtmw_npy/xsub60_raw_full \
-  --split xsub60 \
-  --num-classes 60 \
-  --batch-size 32 \
-  --test-batch-size 32 \
-  --epochs 65 \
-  --num-workers 8 \
-  --device cuda
-~~~
+训练入口从原始 ZIP 在线读取；`--npy-dir` 已弃用。
 
 CPU smoke test：
 
 ~~~bash
 python main.py \
-  --model-variant body-local \
+  --model-variant body-local-hand-ctr-wide-relative-full \
   --feature-mode raw \
   --split xsub60 \
   --num-classes 60 \
@@ -131,9 +129,9 @@ python main.py \
   --save-dir outputs/smoke_body_local
 ~~~
 
-## 模型结构
+## 历史 BodyLocalFusion 模型结构
 
-BodyLocalFusion 的结构配置如下：
+下方为 89.60% 历史模型；默认完整 GCN 的结构见 `docs/full_gcn.md`。
 
 ~~~text
 身体分支：
@@ -160,17 +158,24 @@ BodyLocalFusion 的结构配置如下：
 
 ## 可选模型与历史模型
 
-当前默认模型是 body-local。其他模型需要显式指定：
+当前默认模型是 body-local-hand-ctr-wide-relative-full。其他模型需要显式指定：
 
 | 参数 | 用途 | 状态 |
 |---|---|---|
-| body-local | 当前最佳 BodyLocalFusion | 默认主线 |
+| body-local-hand-ctr-wide-relative-full | 最佳模型的完整 GCN 升级 | 默认，待全量训练 |
+| body-local-hand-ctr-wide-relative | 当前最佳已训练模型，原训练 93.0823% | 最佳结果对照 |
+| body-local | 历史 BodyLocalFusion，89.60% | 历史对照 |
 | body-local-dropout | 分支融合 dropout 对照 | 已实现，结果待补 |
 | body-local-relative | 局部支路使用躯干相对坐标 | 已实现，结果待补 |
 | body-local-relative-split | 手部和面部拆分为独立局部分支 | 已实现，结果待补 |
-| body-local-hand-ctr-wide-relative-routed | 在宽通道手部 CTR-GCN 上加入动作阶段与骨架质量感知的手部/面部门控 | 已实现，结果待补 |
+| body-local-hand-ctr-wide-relative-routed | 阶段与质量门控 | 复测 92.2912%，未超过原最佳 |
+
+| body-local-hand-ctr-wide-relative-class-routed | 身体先分类，按动作需求调用手部 | 已实现，见 docs/class_hand_routing.md |
 
 `body-local-hand-ctr-wide-relative-routed` 保持宽通道手部 CTR-GCN、躯干相对坐标以及跨手距离/方向特征，在手部和面部 ST-GCN 的逐帧融合前加入可微的阶段与质量门控，并可通过 `return_routing=True` 导出手部、面部 gate 和质量统计。原始 ZIP 输入会在线构造这些局部特征，八通道 NPY 也可直接使用。当前实现是 soft routing，局部分支仍会执行完整前向；真实的 hard conditional compute 需要后续按时间段 gather 后再测量 FLOPs 和延迟。
+
+| 参数 | 用途 | 状态 |
+|---|---|---|
 | body-local-time-aug | 时间增强 | 已实现，结果待补 |
 | body-local-coord-aug | 坐标噪声增强 | 已实现，结果待补 |
 | body-local-full | 更大局部分支容量 | 已实现，结果待补 |
@@ -207,7 +212,7 @@ outputs/<model-variant>_<setting>/<split>/<timestamp-run-id>/
   best.pt
 ~~~
 
-当前最佳实验记录：
+历史 BodyLocalFusion 实验记录：
 
 - backup_train_baseline/config.json
 - backup_train_baseline/status.json
@@ -245,12 +250,12 @@ python -m unittest discover -s tests -v
 当前结果应分开报告：
 
 1. RTMW-133 骨架提取和困难样本修复；
-2. BodyLocalFusion 当前最佳动作识别 Baseline；
+2. wide-relative 当前最佳已训练模型，及尚未训练的完整 GCN 升级；
 3. 32 点 main-only CTR-GCN 历史对照；
 4. HAPM 和 RTMWLocalCTR 历史方案；
 5. torso-cross-attn 最新但未验证方案。
 
-“133 点固定局部图 + 32 点动态 CTR”是历史尝试，不是当前默认结构，也不是当前最佳结果。
+“133 点固定局部图 + 32 点动态 CTR”是历史尝试。
 
 ## 相关文件
 

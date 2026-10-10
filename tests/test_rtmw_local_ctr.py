@@ -253,7 +253,7 @@ class RTMWLocalCTRTests(unittest.TestCase):
         with patch("sys.argv", ["main.py"]):
             args = parse_args()
             self.assertEqual(args.backbone_width, "standard")
-            self.assertEqual(args.model_variant, "body-local")
+            self.assertEqual(args.model_variant, "body-local-hand-ctr-wide-relative-full")
             self.assertFalse(args.main_only)
             self.assertEqual(args.archive, "data/ntu60_skeletons_rtmw.zip")
             self.assertEqual(args.split, "xsub60")

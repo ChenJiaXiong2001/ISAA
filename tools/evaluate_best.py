@@ -21,6 +21,7 @@ from isaa.models.body_local_fusion import (
     BodyLocalHandCTRWideRelativeFusion,
     BodyLocalHandCTRWideRelativeRoutedFusion,
 )
+from isaa.models.body_local_full_gcn import FULL_GCN_VARIANT, BodyLocalFullGCNFusion
 from isaa.utils.seed import seed_everything
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
 
@@ -59,6 +60,7 @@ def main():
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = checkpoint["args"]
     classes = {
+        FULL_GCN_VARIANT: BodyLocalFullGCNFusion,
         "body-local-hand-ctr-wide-relative": BodyLocalHandCTRWideRelativeFusion,
         "body-local-hand-ctr-wide-relative-routed": BodyLocalHandCTRWideRelativeRoutedFusion,
         CLASS_HAND_VARIANT: BodyLocalClassHandRoutedFusion,
@@ -77,7 +79,10 @@ def main():
                          hand_threshold=args.get("hand_route_threshold", 0.5),
                          confidence_threshold=args.get("body_confidence_threshold", 0.8),
                          body_temperature=args.get("body_probability_temperature", 1.0))
-             if class_routed else model_class(num_classes=args["num_classes"]))
+             if class_routed else
+             model_class(num_classes=args["num_classes"],
+                         backbone_config=checkpoint["model_config"]["backbone_config"])
+             if model_class is BodyLocalFullGCNFusion else model_class(num_classes=args["num_classes"]))
     if checkpoint.get("architecture") != model.ARCHITECTURE:
         raise ValueError("Checkpoint architecture does not match this model version")
     model.load_state_dict(checkpoint["model"], strict=True)

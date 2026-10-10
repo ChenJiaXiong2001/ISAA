@@ -1,6 +1,6 @@
 """Current RTMW body CTR-GCN + hand/face ST-GCN action classifier.
 
-BodyLocalFusion is the project's default research baseline. It consumes the
+BodyLocalFusion is the project's historical research baseline. It consumes the
 full RTMW-133 tensor with raw x/y/score channels and fuses pooled body and local branch
 features immediately before classification. Legacy 32-node ISAA models and
 newer attention variants remain selectable for explicit comparisons.
@@ -16,8 +16,9 @@ from torch.nn import functional as F
 from isaa.graph.adjacency import build_joint_spatial_partitions, build_joint_adjacency
 from isaa.graph.regions import build_region_partition
 from isaa.layouts.rtmw_133 import RTMW_32_NODE_INDICES
-from isaa.models.original_ctrgcn import TCNGCNUnit, build_official_rtmw_adjacency
+from isaa.models.original_ctrgcn import build_official_rtmw_adjacency
 from isaa.models.official_stgcn import OfficialSTGCNFeatureExtractor
+from isaa.models.backbones.ctrgcn import OfficialCTRGCNFeatureExtractor
 from isaa.models.rtmw_local_ctr import CTRGCNBlock, FaceTokenCompression, PointBatchNorm
 
 
@@ -192,6 +193,20 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         self.hand_to_local = (nn.Identity() if self.HAND_CHANNELS[-1] == self.LOCAL_CHANNELS[-1]
                               else nn.Conv2d(self.HAND_CHANNELS[-1], self.LOCAL_CHANNELS[-1], 1, bias=False))
 
+    def _run_body(self, body, bm):
+        batch, _, time, nodes = body.shape
+        norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(batch, 3 * nodes, time, 1)
+        body = self.body_input_norm(body.permute(0, 1, 3, 2).reshape(batch, 3 * nodes, time, 1), norm_mask)
+        body = body.reshape(batch, 3, nodes, time).permute(0, 1, 3, 2)
+        for block in self.body_blocks:
+            body, bm = block(body, bm)
+        return body, bm
+
+    def _run_face(self, face, face_mask):
+        for block in self.face_st_blocks:
+            face, face_mask = block(face, face_mask)
+        return face, face_mask
+
     def _run_hand(self, hand, hand_mask):
         for block in self.hand_ctr_blocks:
             hand, hand_mask = block(hand, hand_mask)
@@ -220,13 +235,7 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
 
         body = x[:, :3].index_select(-1, self.body_indices)
         bm = mask.index_select(-1, self.body_indices)
-        norm_mask = bm.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(
-            b * m, 3 * len(self.BODY_INDICES), t, 1)
-        body = self.body_input_norm(body.permute(0, 1, 3, 2).reshape(
-            b * m, 3 * len(self.BODY_INDICES), t, 1), norm_mask)
-        body = body.reshape(b * m, 3, len(self.BODY_INDICES), t).permute(0, 1, 3, 2)
-        for block in self.body_blocks:
-            body, bm = block(body, bm)
+        body, bm = self._run_body(body, bm)
 
         if c in (5, 8):
             # Preprocessed files store torso-relative x/y in channels 3:5.
@@ -297,8 +306,7 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         fc = fm.sum(-1)
         face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
         face_mask = fc > 0
-        for block in self.face_st_blocks:
-            face, face_mask = block(face, face_mask)
+        face, face_mask = self._run_face(face, face_mask)
         face_t, face_valid = self._pool_nodes_per_frame(face, face_mask)
 
         body_t, body_valid = self._pool_nodes_per_frame(body, bm)
@@ -808,46 +816,6 @@ class TorsoCenteredCrossBranchFusion(BodyLocalFusion):
         valid = valid.reshape(b, m, target_t).any(1)
         pooled = (fused * valid.unsqueeze(-1)).sum(1) / valid.sum(1, keepdim=True).clamp_min(1)
         return self.classifier(pooled)
-
-
-class OfficialCTRGCNFeatureExtractor(nn.Module):
-    """Official CTR-GCN ten-block backbone without its classifier."""
-
-    CHANNELS = (64, 64, 64, 64, 128, 128, 128, 256, 256, 256)
-
-    def __init__(self, adjacency: torch.Tensor, in_channels: int = 3,
-                 channels: tuple[int, ...] | None = None):
-        super().__init__()
-        adjacency = torch.as_tensor(adjacency, dtype=torch.float32)
-        if adjacency.shape[0] != 3 or adjacency.shape[1] != adjacency.shape[2]:
-            raise ValueError("CTR-GCN adjacency must have shape 3 x V x V")
-        self.num_point = int(adjacency.shape[1])
-        self.in_channels = int(in_channels)
-        self.channels = tuple(channels or self.CHANNELS)
-        if len(self.channels) != 10:
-            raise ValueError("CTR-GCN feature extractor requires ten channel widths")
-        self.register_buffer("A", adjacency)
-        self.data_bn = nn.BatchNorm1d(self.in_channels * self.num_point)
-        layers = []
-        cin = self.in_channels
-        for index, cout in enumerate(self.channels):
-            layers.append(TCNGCNUnit(
-                cin, cout, self.A, stride=2 if index in (4, 7) else 1,
-                residual=index != 0, adaptive=True,
-            ))
-            cin = cout
-        self.blocks = nn.ModuleList(layers)
-
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, int]:
-        b, c, t, v, m = x.shape
-        if (c, v, m) != (self.in_channels, self.num_point, 1):
-            raise ValueError(f"Expected C,V,M=({self.in_channels},{self.num_point},1), got {(c,v,m)}")
-        x = x.permute(0, 4, 3, 1, 2).contiguous().view(b, v * c, t)
-        x = self.data_bn(x)
-        x = x.view(b, 1, v, c, t).permute(0, 1, 3, 4, 2).contiguous().view(b, c, t, v)
-        for block in self.blocks:
-            x = block(x)
-        return x, int(x.shape[2])
 
 
 class OfficialTorsoCenteredCrossBranchFusion(nn.Module):
