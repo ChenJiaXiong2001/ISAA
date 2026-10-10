@@ -22,6 +22,8 @@ from isaa.models.body_local_fusion import (
     BodyLocalHandCTRWideRelativeRoutedFusion,
 )
 from isaa.models.body_local_full_gcn import FULL_GCN_VARIANT, BodyLocalFullGCNFusion
+from isaa.models.hand_body_proximity import PROXIMITY_VARIANT, HandBodyProximityFusion
+from isaa.models.best_hand_body_proximity import BEST_PROXIMITY_VARIANT, BestHandBodyProximityFusion
 from isaa.utils.seed import seed_everything
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
 
@@ -60,6 +62,8 @@ def main():
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = checkpoint["args"]
     classes = {
+        BEST_PROXIMITY_VARIANT: BestHandBodyProximityFusion,
+        PROXIMITY_VARIANT: HandBodyProximityFusion,
         FULL_GCN_VARIANT: BodyLocalFullGCNFusion,
         "body-local-hand-ctr-wide-relative": BodyLocalHandCTRWideRelativeFusion,
         "body-local-hand-ctr-wide-relative-routed": BodyLocalHandCTRWideRelativeRoutedFusion,
@@ -80,6 +84,13 @@ def main():
                          confidence_threshold=args.get("body_confidence_threshold", 0.8),
                          body_temperature=args.get("body_probability_temperature", 1.0))
              if class_routed else
+             model_class(num_classes=args["num_classes"],
+                         interaction_config=checkpoint["model_config"]["interaction_config"])
+             if model_class is BestHandBodyProximityFusion else
+             model_class(num_classes=args["num_classes"],
+                         backbone_config=checkpoint["model_config"]["backbone_config"],
+                         interaction_config=checkpoint["model_config"]["interaction_config"])
+             if model_class is HandBodyProximityFusion else
              model_class(num_classes=args["num_classes"],
                          backbone_config=checkpoint["model_config"]["backbone_config"])
              if model_class is BodyLocalFullGCNFusion else model_class(num_classes=args["num_classes"]))

@@ -12,7 +12,7 @@ ISAA 当前默认模型是 **BodyLocalFullGCNFusion**（`body-local-hand-ctr-wid
 python train_full_gcn.py --device cuda
 ```
 
-`train_full_gcn.py` 提供完整 GCN 的 NTU60 XSub 训练预设，默认关闭 torch.compile，输出保存到 `outputs/full_gcn_ntu60_xsub/`。可传入 `--compile` 开启编译，或通过 `--gcn-config` 调整各分支。
+`train_full_gcn.py` 提供完整 GCN 的 NTU60 XSub 训练预设，默认开启 torch.compile（reduce-overhead），输出保存到 `outputs/full_gcn_ntu60_xsub/`。可传入 `--no-compile` 关闭编译，或通过 `--gcn-config` 调整各分支。
 
 下方 89.60% 为历史 BodyLocalFusion 实验结果，不是当前最佳。旧模型通过显式 `--model-variant` 运行。
 
@@ -83,7 +83,7 @@ RTMDet-tiny 负责正常样本，原始质量检查失败样本使用 YOLO26-X �
 | 学习率衰减 | 零基轮次 35、55 |
 | 随机种子 | 1 |
 | cuDNN | 强制开启 |
-| torch.compile | main.py 默认开启；完整 GCN 专用入口默认关闭，可通过参数调整 |
+| torch.compile | 默认开启，模式 reduce-overhead；可通过 --no-compile 关闭 |
 | DataLoader workers | 8 |
 
 BodyLocalFusion 不使用 32 点输入。32 点 main-only CTR-GCN 已降为显式的历史对照模型。
@@ -267,3 +267,21 @@ python -m unittest discover -s tests -v
 - BodyLocalFusion 配置：backup_train_baseline/config.json
 - BodyLocalFusion 状态：backup_train_baseline/status.json
 - BodyLocalFusion 指标：backup_train_baseline/epochs.csv
+
+## 新增手部-身体邻近交互变体
+
+原有模型、默认入口和训练脚本保留。新增 `hand-body-proximity`：全身统一使用躯干相对坐标，绝对坐标仅用于躯干上下文，每只手保留全部 21 点，仅对附近非手节点计算交互特征。配置、诊断接口和使用方式见 [手部-身体邻近交互说明](docs/hand_body_proximity.md)。
+
+```bash
+python train_hand_body_proximity.py --device cuda
+python train_hand_body_proximity.py --dry-run --device cpu --window-size 9 --num-workers 0 --no-compile
+```
+
+## 基于最佳模型只做新增
+
+严格增量入口为 `best-hand-body-proximity`：完整保留当前最佳 `body-local-hand-ctr-wide-relative` 的六通道手部特征（含双手距离与方向）、身体/手部/面部骨干、原坐标输入和融合，仅叠加邻近手部-身体交互与躯干上下文。新实验从头独立训练，不加载原最佳权重，所有分支一起学习；结果写入单独目录 `outputs/best_hand_body_proximity_ntu60_xsub`。此前所有变体继续保留。详见 [最佳模型严格增量方案](docs/best_hand_body_proximity.md)。
+
+```bash
+python train_best_hand_body_proximity.py --device cuda
+python train_best_hand_body_proximity.py --dry-run --device cpu --window-size 9 --num-workers 0 --no-compile
+```

@@ -24,11 +24,14 @@ class BodyLocalFullGCNFusion(BodyLocalHandCTRWideRelativeFusion):
     LOCAL_CHANNELS = STGCNBackbone.CHANNELS
     STRIDES = CTRGCNBackbone.STRIDES
 
-    def __init__(self, num_classes=120, *, backbone_config=None):
+    def __init__(self, num_classes=120, *, backbone_config=None, hand_input_channels=6):
         # Construct only the encoders used in forward; no inherited unused stack.
         nn.Module.__init__(self)
         if num_classes < 1:
             raise ValueError("num_classes must be positive")
+        if hand_input_channels not in (3, 6):
+            raise ValueError("hand_input_channels must be 3 or 6")
+        self.HAND_INPUT_CHANNELS = hand_input_channels
         config = dict(backbone_config or {})
         if set(config) - {"body", "hand", "face"}:
             raise ValueError("backbone_config only accepts body, hand and face")
@@ -48,7 +51,7 @@ class BodyLocalFullGCNFusion(BodyLocalHandCTRWideRelativeFusion):
 
         self.body_encoder = CTRGCNBackbone(induced(self.BODY_INDICES), in_channels=3,
                                            **config.get("body", {}))
-        self.hand_encoder = CTRGCNBackbone(induced(self.HAND_INDICES[:21]), in_channels=6,
+        self.hand_encoder = CTRGCNBackbone(induced(self.HAND_INDICES[:21]), in_channels=hand_input_channels,
                                            **config.get("hand", {}))
         # Contract all three face partitions. ST-GCN uses source,target order.
         face_graph = compressor.adjacency[:, 65:, 65:]

@@ -1,0 +1,6 @@
+{
+  "width": 64,
+  "radius_on": 0.4,
+  "radius_off": 0.48,
+  "confidence_threshold": 0.0
+}
