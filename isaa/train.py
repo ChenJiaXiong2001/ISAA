@@ -59,7 +59,11 @@ def _prefer_bundled_cuda_libraries() -> None:
     if os.environ.get("ISAA_CUDNN_ENV_FIXED") != "1":
         os.environ["LD_LIBRARY_PATH"] = desired
         os.environ["ISAA_CUDNN_ENV_FIXED"] = "1"
-        os.execvpe(sys.executable, [sys.executable, *sys.argv], os.environ)
+        # sys.argv loses '-m' / '-c', so preserve the original interpreter
+        # arguments when restarting module-based test/evaluation commands.
+        original = getattr(sys, "orig_argv", None)
+        restart_args = original[1:] if original else sys.argv
+        os.execvpe(sys.executable, [sys.executable, *restart_args], os.environ)
     os.environ["LD_LIBRARY_PATH"] = desired
 
 
@@ -73,6 +77,7 @@ from isaa.data.rtmw_zip_dataset import RTMWZipDataset
 from isaa.data.rtmw_npy_dataset import RTMWNpyDataset
 from isaa.data.ntu_preprocessed_dataset import NTUPreprocessedDataset
 from isaa.models.rtmw_local_ctr import RTMWLocalCTR
+from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
 from isaa.models.body_local_fusion import (
     BodyLocalFusion, BodyLocalDropoutFusion, BodyLocalFullFusion, BodyLocalRelativeFusion,
     BodyLocalHandCTRRelativeFusion, BodyLocalHandCTRWideRelativeFusion,
@@ -126,7 +131,7 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
                         help="Default: BodyLocalFusion; isaa/original are legacy explicit comparison models")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
@@ -179,6 +184,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Synthetic forward check; no ZIP needed")
     parser.add_argument("--console-only", action="store_true",
                         help="Keep training output on the terminal without creating console.log")
+    parser.add_argument("--init-checkpoint", default=None,
+                        help="Original wide-relative best.pt for class-hand routing initialization")
+    parser.add_argument("--class-hand-freeze-backbone", action=argparse.BooleanOptionalAction,
+                        default=True, help="Train only new body/no-hand heads for class-hand routing")
+    parser.add_argument("--routing-calibration-fraction", type=float, default=0.2,
+                        help="Training subjects held out for hand requirement estimation")
+    parser.add_argument("--hand-route-threshold", type=float, default=0.5)
+    parser.add_argument("--body-confidence-threshold", type=float, default=0.8)
+    parser.add_argument("--body-probability-temperature", type=float, default=1.0)
+    parser.add_argument("--hand-requirement-margin", type=float, default=0.0)
+    parser.add_argument("--hand-requirement-temperature", type=float, default=0.1)
+    parser.add_argument("--hand-requirement-min-samples", type=int, default=5)
+    parser.add_argument("--body-loss-weight", type=float, default=1.0)
+    parser.add_argument("--no-hand-loss-weight", type=float, default=1.0)
+    parser.add_argument("--routing-distill-weight", type=float, default=0.5)
+    parser.add_argument("--routing-distill-temperature", type=float, default=2.0)
     args = parser.parse_args()
     if args.npy_dir:
         print("warning: --npy-dir is deprecated; all training now streams raw samples from --archive in memory", file=sys.stderr)
@@ -217,7 +238,7 @@ def parse_args() -> argparse.Namespace:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if args.node_count is None:
         args.node_count = args.num_main_nodes
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
         args.main_only = False
         args.node_count = 133
         args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
@@ -262,6 +283,23 @@ def parse_args() -> argparse.Namespace:
         parser.error("num-workers/max-samples must be nonnegative and lr positive and finite")
     if args.prefetch_factor < 1 or not 0 < args.log_interval < float("inf"):
         parser.error("prefetch-factor and log-interval must be positive and finite")
+    if args.model_variant == CLASS_HAND_VARIANT:
+        import math
+        if not 0 < args.routing_calibration_fraction < 1:
+            parser.error("routing-calibration-fraction must be between zero and one")
+        if not 0 <= args.hand_route_threshold <= 1 or not 0 <= args.body_confidence_threshold <= 1:
+            parser.error("routing thresholds must be in [0, 1]")
+        temperatures = (args.body_probability_temperature, args.hand_requirement_temperature,
+                        args.routing_distill_temperature)
+        if any(not math.isfinite(value) or value <= 0 for value in temperatures):
+            parser.error("routing temperatures must be finite and positive")
+        weights = (args.body_loss_weight, args.no_hand_loss_weight, args.routing_distill_weight)
+        if any(not math.isfinite(value) or value < 0 for value in weights):
+            parser.error("routing loss weights must be finite and nonnegative")
+        if args.body_loss_weight == 0 or args.no_hand_loss_weight == 0:
+            parser.error("both auxiliary heads require positive direct classification weights")
+        if not math.isfinite(args.hand_requirement_margin) or args.hand_requirement_min_samples < 1:
+            parser.error("requirement margin must be finite and min-samples positive")
     return args
 
 
@@ -389,7 +427,9 @@ def run_epoch(
 
 def main() -> None:
     args = parse_args()
-    if args.model_variant == "body-local":
+    if args.model_variant == CLASS_HAND_VARIANT:
+        variant = BodyLocalClassHandRoutedFusion.ARCHITECTURE
+    elif args.model_variant == "body-local":
         variant = BodyLocalFusion.ARCHITECTURE
     elif args.model_variant == "body-local-time-aug":
         variant = BodyLocalFusion.ARCHITECTURE + "_time_aug"
@@ -465,6 +505,10 @@ def _run(args, save_dir, records) -> None:
         torch.backends.cuda.matmul.allow_tf32 = args.tf32
     if args.num_workers is None:
         args.num_workers = min(8, max(1, (os.cpu_count() or 1) // 2)) if device.type == "cuda" else 0
+    if args.model_variant == CLASS_HAND_VARIANT:
+        from isaa.class_hand_training import run_class_hand_training
+        run_class_hand_training(args, save_dir, records, device)
+        return
     if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
         model_class = (BodyLocalRelativeSplitFusion if args.model_variant == "body-local-relative-split"
                        else BodyLocalHandCTRWideRelativeRoutedFusion if args.model_variant == "body-local-hand-ctr-wide-relative-routed"
