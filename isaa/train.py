@@ -81,6 +81,7 @@ from isaa.models.rtmw_local_ctr import RTMWLocalCTR
 from isaa.models.body_local_full_gcn import FULL_GCN_VARIANT, BodyLocalFullGCNFusion
 from isaa.models.hand_body_proximity import PROXIMITY_VARIANT, HandBodyProximityFusion
 from isaa.models.best_hand_body_proximity import BEST_PROXIMITY_VARIANT, BestHandBodyProximityFusion
+from isaa.models.best_action_hand_body import ACTION_PROXIMITY_VARIANT, BestActionHandBodyFusion
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
 from isaa.models.body_local_fusion import (
     BodyLocalFusion, BodyLocalDropoutFusion, BodyLocalFullFusion, BodyLocalRelativeFusion,
@@ -135,7 +136,7 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
                         help="Default: full GCN upgrade of the best wide-relative model")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
@@ -246,7 +247,7 @@ def parse_args() -> argparse.Namespace:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if args.node_count is None:
         args.node_count = args.num_main_nodes
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
         args.main_only = False
         args.node_count = 133
         args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
@@ -272,7 +273,7 @@ def parse_args() -> argparse.Namespace:
         if not args.main_only and args.node_count not in {32, 133}:
             parser.error("ISAA 辅助分支当前只支持 32 节点主干；25/50/71 阶段请保持 --main-only")
     args.backbone_config = None
-    if args.model_variant in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT} and args.feature_mode != "raw":
+    if args.model_variant in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT} and args.feature_mode != "raw":
         parser.error("Hand/body proximity variants require raw x/y/score input")
     if args.gcn_config is not None:
         if args.model_variant not in {FULL_GCN_VARIANT, PROXIMITY_VARIANT}:
@@ -285,7 +286,7 @@ def parse_args() -> argparse.Namespace:
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
     if args.interaction_config is not None:
-        if args.model_variant not in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT}:
+        if args.model_variant not in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT}:
             parser.error("--interaction-config requires a hand/body proximity variant")
         try:
             args.interaction_config = json.loads(args.interaction_config.read_text(encoding="utf-8"))
@@ -293,8 +294,16 @@ def parse_args() -> argparse.Namespace:
                 raise ValueError("Interaction config must be a JSON object")
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
-    if args.init_checkpoint and args.model_variant not in {FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, CLASS_HAND_VARIANT}:
+    if args.init_checkpoint and args.model_variant not in {FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, CLASS_HAND_VARIANT}:
         parser.error("--init-checkpoint requires a full-GCN, hand/body proximity or class-hand routed model")
+    if args.model_variant == ACTION_PROXIMITY_VARIANT:
+        if args.init_checkpoint:
+            parser.error("best-action-hand-body trains from scratch; --init-checkpoint is not allowed")
+        try:
+            from isaa.models.best_action_hand_body import validated_config
+            args.interaction_config = validated_config(args.interaction_config, args.num_classes)
+        except ValueError as exc:
+            parser.error(str(exc))
     args.num_main_nodes = args.node_count if args.node_count != 133 else 32
     if min(args.num_classes, args.window_size, args.batch_size, args.test_batch_size,
            args.epochs, args.auxiliary_channels, args.max_persons,
@@ -378,6 +387,9 @@ def run_epoch(
                      if records is not None else None)
     record_wait = []
     record_host_seconds = []
+    underlying = getattr(model, "_orig_mod", model)
+    action_interaction = isinstance(underlying, BestActionHandBodyFusion)
+    interaction_rows = []
     try:
         with torch.set_grad_enabled(training):
             for step, (x, labels, frame_mask) in enumerate(loader, start=1):
@@ -390,14 +402,23 @@ def run_epoch(
                 frame_mask = frame_mask.to(device, non_blocking=non_blocking)
                 if training and (step - 1) % grad_accum_steps == 0:
                     optimizer.zero_grad(set_to_none=True)
-                logits = model(x, frame_mask)
-                loss = criterion(logits, labels)
+                if action_interaction:
+                    logits, details = model(x, frame_mask, return_interaction=True)
+                    combined_loss, components = underlying.classification_loss(logits, details, labels)
+                    loss = combined_loss if training else components["final_loss"]
+                else:
+                    logits = model(x, frame_mask)
+                    loss = criterion(logits, labels)
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite loss at batch {step}")
                 if training:
                     group_size = min(grad_accum_steps,
                                      total_steps - ((step - 1) // grad_accum_steps) * grad_accum_steps)
                     (loss / group_size).backward()
+                    if action_interaction:
+                        gradients = [p.grad.detach().square().sum() for name, p in underlying.named_parameters()
+                                     if name.startswith("interaction.") and p.grad is not None]
+                        gradient_norm = torch.stack(gradients).sum().sqrt() if gradients else loss.new_zeros(())
                     if step % grad_accum_steps == 0 or step == total_steps:
                         optimizer.step()
                 count = labels.size(0)
@@ -407,6 +428,21 @@ def run_epoch(
                     top5 = logits.topk(min(5, logits.size(1)), dim=1).indices
                     correct_top5 = (top5 == labels[:, None]).any(dim=1).sum()
                     totals += torch.stack((loss.detach() * count, correct, correct_top5)).to(totals.dtype)
+                    if action_interaction:
+                        values = {
+                            **components,
+                            "baseline_top1": (details["baseline_logits"].argmax(1) == labels).float().mean(),
+                            "interaction_correction_l2": details["correction"].norm(dim=1).mean(),
+                            "interaction_edges_per_sample": loss.new_tensor(details["edges"].shape[0] / count),
+                            "interaction_gradient_l2": gradient_norm if training else loss.new_zeros(()),
+                            "interaction_strength": underlying.interaction_strength,
+                        }
+                        for r, region in enumerate(details["region_names"]):
+                            values[f"enabled_{region}"] = details["region_enabled"][:, r].float().mean()
+                            values[f"active_{region}"] = details["region_active"][:, r].float().mean()
+                            values[f"gate_{region}"] = details["applied_gate"][:, r].mean()
+                        metric_names = list(values)
+                        interaction_rows.append(torch.stack([v.detach().clone() for v in values.values()]) * count)
                 total += count
                 if records is not None:
                     record_values[step - 1].copy_(torch.stack(
@@ -449,17 +485,23 @@ def run_epoch(
                 })
     finally:
         finish_progress_lines()
+    extra_metrics = {}
+    if interaction_rows:
+        extra_metrics = dict(zip(metric_names, (torch.stack(interaction_rows).sum(0) / total).cpu().tolist()))
     return {
         "loss": loss_sum / total, "top1": correct / total, "top5": correct_top5 / total,
         "samples_per_second": total / max(now - stage_started_at, 1e-9),
         "data_wait_seconds": data_wait_seconds,
         "elapsed_seconds": now - stage_started_at, "samples": total, "steps": total_steps,
+        **extra_metrics,
     }
 
 
 def main() -> None:
     args = parse_args()
-    if args.model_variant == BEST_PROXIMITY_VARIANT:
+    if args.model_variant == ACTION_PROXIMITY_VARIANT:
+        variant = BestActionHandBodyFusion.ARCHITECTURE
+    elif args.model_variant == BEST_PROXIMITY_VARIANT:
         variant = BestHandBodyProximityFusion.ARCHITECTURE
     elif args.model_variant == PROXIMITY_VARIANT:
         variant = HandBodyProximityFusion.ARCHITECTURE
@@ -564,8 +606,9 @@ def _run(args, save_dir, records) -> None:
             args.backbone_config = initial_checkpoint["model_config"]["backbone_config"]
         if args.model_variant == PROXIMITY_VARIANT and args.interaction_config is None:
             args.interaction_config = initial_checkpoint["model_config"]["interaction_config"]
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
-        model_class = (BestHandBodyProximityFusion if args.model_variant == BEST_PROXIMITY_VARIANT
+    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
+        model_class = (BestActionHandBodyFusion if args.model_variant == ACTION_PROXIMITY_VARIANT
+                       else BestHandBodyProximityFusion if args.model_variant == BEST_PROXIMITY_VARIANT
                        else HandBodyProximityFusion if args.model_variant == PROXIMITY_VARIANT
                        else BodyLocalFullGCNFusion if args.model_variant == FULL_GCN_VARIANT
                        else BodyLocalRelativeSplitFusion if args.model_variant == "body-local-relative-split"
@@ -576,7 +619,7 @@ def _run(args, save_dir, records) -> None:
                        else BodyLocalRelativeFusion if args.model_variant == "body-local-relative"
                        else BodyLocalFusion)
         model = (model_class(num_classes=args.num_classes, interaction_config=args.interaction_config)
-                 if args.model_variant == BEST_PROXIMITY_VARIANT else
+                 if args.model_variant in {BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT} else
                  model_class(num_classes=args.num_classes, backbone_config=args.backbone_config,
                              interaction_config=args.interaction_config)
                  if args.model_variant == PROXIMITY_VARIANT else
@@ -592,7 +635,8 @@ def _run(args, save_dir, records) -> None:
                         "hand_input_channels": getattr(model, "HAND_INPUT_CHANNELS", 3),
                         "backbone_config": getattr(model, "backbone_config", None),
                         "interaction_config": getattr(model, "interaction_config", None),
-                        "local_branch_mode": ("original_best_plus_sparse_hand_body" if args.model_variant == BEST_PROXIMITY_VARIANT
+                        "local_branch_mode": ("original_best_plus_action_candidate_hand_body" if args.model_variant == ACTION_PROXIMITY_VARIANT
+                                              else "original_best_plus_sparse_hand_body" if args.model_variant == BEST_PROXIMITY_VARIANT
                                               else "relative_full_gcn_absolute_torso_sparse_hand_body" if args.model_variant == PROXIMITY_VARIANT
                                               else "full_official_body_ctr_shared_hand_ctr_face_st" if args.model_variant == FULL_GCN_VARIANT
                                               else "shared_hand_ctr_wide_face_st_routed" if args.model_variant == "body-local-hand-ctr-wide-relative-routed"
@@ -699,13 +743,15 @@ def _run(args, save_dir, records) -> None:
                    ("config/nturgbd120-cross-set/default.yaml" if args.split == "xset120"
                     else "config/nturgbd120-cross-subject/default.yaml")),
         "schedule": "main.py:adjust_learning_rate (zero-based milestones)",
-        "adaptation": ("Unchanged original best features/backbones/fusion plus sparse hand/body feature residual"
+        "adaptation": ("Original best unchanged; scratch training; candidate/proximity routed residual and independent baseline/interaction supervision"
+                       if args.model_variant == ACTION_PROXIMITY_VARIANT else
+                       "Unchanged original best features/backbones/fusion plus sparse hand/body feature residual"
                        if args.model_variant == BEST_PROXIMITY_VARIANT else
                        "Relative full GCN; absolute torso context; sparse radius-limited hand/body interaction"
                        if args.model_variant == PROXIMITY_VARIANT else
                        "Full official body/hand CTR-GCN and face ST-GCN; best wide-relative features and fusion"
                        if args.model_variant == FULL_GCN_VARIANT else "BodyLocalFusion: body22 CTR-GCN + hand42/face6 ST-GCN, raw x/y/score, masked pooling and pre-classifier fusion"
-                       if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
+                       if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
                        (f"official RTMW induced {args.node_count}-node graph, raw x/y/score, ordinary BN, no masks"
                         if args.model_variant == "original" else
                         "RTMW relative xy/score, masks, 32 joints; existing crop/pad preprocessing")),
@@ -723,7 +769,7 @@ def _run(args, save_dir, records) -> None:
                                    "cudnn": cudnn_version,
                                    "cudnn_enabled": torch.backends.cudnn.enabled},
                           reference=reference,
-                          preprocessing={"channels": (["raw_x", "raw_y", "score"] if args.model_variant in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT} else
+                          preprocessing={"channels": (["raw_x", "raw_y", "score"] if args.model_variant in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT} else
                                                       ["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y"]
                                                       if args.model_variant == "body-local-relative-split" else
                                                       (["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y", "cross_hand_distance", "cross_hand_direction_x", "cross_hand_direction_y"]
@@ -739,6 +785,13 @@ def _run(args, save_dir, records) -> None:
                                          } if (temporal_augmented or coordinate_augmented) else {
                                              "random_temporal_crop": not bool(args.npy_dir),
                                          })})
+    if args.model_variant == ACTION_PROXIMITY_VARIANT:
+        records.update_config(initialization="random_from_scratch", interaction_training={
+            **model.interaction_config,
+            "routing_labels": "losses_only; forward uses detached baseline probabilities",
+            "inference": "hard candidate threshold + distance hysteresis",
+            "training": "soft candidate gates; exploration floor decays during ramp",
+        })
     if args.model_variant == "original":
         print(f"Original CTR-GCN RTMW{args.node_count} points={args.max_persons} device={device} "
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
@@ -746,8 +799,9 @@ def _run(args, save_dir, records) -> None:
             stage_label = _IMPLEMENTED_ABLATION_STAGES.get(args.ablation_stage or "", {}).get("label")
             print(f"ablation_stage: {args.ablation_stage}"
                   + (f" ({stage_label})" if stage_label else ""), flush=True)
-    elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
-        label = ("BestHandBodyProximityFusion" if args.model_variant == BEST_PROXIMITY_VARIANT
+    elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
+        label = ("BestActionHandBodyFusion" if args.model_variant == ACTION_PROXIMITY_VARIANT
+                 else "BestHandBodyProximityFusion" if args.model_variant == BEST_PROXIMITY_VARIANT
                  else "HandBodyProximityFusion" if args.model_variant == PROXIMITY_VARIANT
                  else "BodyLocalFullGCNFusion" if args.model_variant == FULL_GCN_VARIANT
                  else "BodyLocalHandCTRWideRelativeRoutedFusion" if args.model_variant == "body-local-hand-ctr-wide-relative-routed"
@@ -790,8 +844,8 @@ def _run(args, save_dir, records) -> None:
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "
           f"prefetch_factor={args.prefetch_factor if args.num_workers > 0 else None}", flush=True)
     if args.dry_run:
-        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
-        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
+        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
+        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
             args.node_count if args.main_only else 133
         )
         synthetic_channels = (8 if args.model_variant in {"body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, "body-local-hand-ctr-wide-relative-routed"}
@@ -806,7 +860,7 @@ def _run(args, save_dir, records) -> None:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
-            elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+            elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
@@ -845,7 +899,7 @@ def _run(args, save_dir, records) -> None:
     loaders = {}
     dataset_info = {}
     if args.npy_dir:
-        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             npy_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         elif args.main_only:
             npy_indices = model.main_joint_indices.cpu()
@@ -853,7 +907,7 @@ def _run(args, save_dir, records) -> None:
             npy_indices = None
         collate = partial(collate_preprocessed, main_indices=npy_indices)
     else:
-        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             main_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         else:
             main_indices = model.main_joint_indices.cpu() if args.main_only else None
@@ -935,7 +989,9 @@ def _run(args, save_dir, records) -> None:
     else:
         records.update_config(dataset=dataset_info, archive=str(archive.resolve()),
                               archive_bytes=archive.stat().st_size, archive_mtime_ns=archive.stat().st_mtime_ns)
-    optimizer = torch.optim.SGD(train_model.parameters(), lr=args.lr, momentum=args.momentum,
+    optimizer_parameters = (model.optimizer_groups(args.weight_decay)
+                            if args.model_variant == ACTION_PROXIMITY_VARIANT else train_model.parameters())
+    optimizer = torch.optim.SGD(optimizer_parameters, lr=args.lr, momentum=args.momentum,
                                 nesterov=args.nesterov, weight_decay=args.weight_decay)
     best_accuracy = -1.0
     best_epoch = 0
@@ -944,6 +1000,8 @@ def _run(args, save_dir, records) -> None:
     steps_per_epoch = train_steps + len(loaders["val"])
     total_run_steps = steps_per_epoch * args.epochs
     for epoch in range(1, args.epochs + 1):
+        if args.model_variant == ACTION_PROXIMITY_VARIANT:
+            model.set_training_epoch(epoch)
         if args.model_variant == "isaa":
             model.set_fine_enabled(not args.main_only and epoch > args.fine_start_epoch)
         learning_rate = ctrgcn_learning_rate(epoch - 1, args.lr, args.warmup_epochs,
@@ -974,6 +1032,9 @@ def _run(args, save_dir, records) -> None:
             stage = "body22_ctr+hand_stgcn_face_stgcn_torso_relative"
         elif args.model_variant == "body-local-hand-ctr-relative":
             stage = "body22_ctr+hand_ctr21_face_stgcn_torso_relative"
+        elif args.model_variant == ACTION_PROXIMITY_VARIANT:
+            strength = model.interaction_strength.item()
+            stage = "original_best_warmup" if strength == 0 else ("action_interaction_ramp" if strength < 1 else "action_interaction_joint")
         elif args.model_variant == BEST_PROXIMITY_VARIANT:
             stage = "original_best_plus_sparse_hand_body"
         elif args.model_variant == PROXIMITY_VARIANT:
@@ -999,6 +1060,12 @@ def _run(args, save_dir, records) -> None:
             log_interval=args.log_interval,
             records=records, epoch=epoch, learning_rate=learning_rate,
         )
+        if args.model_variant == ACTION_PROXIMITY_VARIANT:
+            print(f"interaction: strength={train_metrics['interaction_strength']:.3f} "
+                  f"grad_l2={train_metrics['interaction_gradient_l2']:.6g} "
+                  f"correction_l2={train_metrics['interaction_correction_l2']:.6g} "
+                  f"edges/sample={train_metrics['interaction_edges_per_sample']:.1f} "
+                  f"baseline_top1={train_metrics['baseline_top1']:.4f}", flush=True)
         print(f"Eval epoch: {epoch}/{args.epochs}", flush=True)
         progress_context["completed_before"] = completed_before + train_steps
         val_metrics = run_epoch(

@@ -24,6 +24,7 @@ from isaa.models.body_local_fusion import (
 from isaa.models.body_local_full_gcn import FULL_GCN_VARIANT, BodyLocalFullGCNFusion
 from isaa.models.hand_body_proximity import PROXIMITY_VARIANT, HandBodyProximityFusion
 from isaa.models.best_hand_body_proximity import BEST_PROXIMITY_VARIANT, BestHandBodyProximityFusion
+from isaa.models.best_action_hand_body import ACTION_PROXIMITY_VARIANT, BestActionHandBodyFusion
 from isaa.utils.seed import seed_everything
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
 
@@ -55,6 +56,8 @@ def main():
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--hand-mode", choices=("adaptive", "all", "none"), default="adaptive")
+    parser.add_argument("--interaction-mode", choices=("adaptive", "none"), default="adaptive",
+                        help="Conditional hand/body model: none removes the co-trained interaction correction")
     options = parser.parse_args()
     checkpoint_path = options.checkpoint.resolve()
     checkpoint_bytes = checkpoint_path.read_bytes()
@@ -62,6 +65,7 @@ def main():
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = checkpoint["args"]
     classes = {
+        ACTION_PROXIMITY_VARIANT: BestActionHandBodyFusion,
         BEST_PROXIMITY_VARIANT: BestHandBodyProximityFusion,
         PROXIMITY_VARIANT: HandBodyProximityFusion,
         FULL_GCN_VARIANT: BodyLocalFullGCNFusion,
@@ -72,6 +76,9 @@ def main():
     model_class = classes[args["model_variant"]]
     routed = model_class is BodyLocalHandCTRWideRelativeRoutedFusion
     class_routed = model_class is BodyLocalClassHandRoutedFusion
+    action_routed = model_class is BestActionHandBodyFusion
+    if options.interaction_mode != "adaptive" and not action_routed:
+        parser.error("--interaction-mode none requires best-action-hand-body")
     seed_everything(args.get("seed", 1))
     device = torch.device(options.device)
     if device.type == "cuda":
@@ -86,7 +93,7 @@ def main():
              if class_routed else
              model_class(num_classes=args["num_classes"],
                          interaction_config=checkpoint["model_config"]["interaction_config"])
-             if model_class is BestHandBodyProximityFusion else
+             if model_class in {BestHandBodyProximityFusion, BestActionHandBodyFusion} else
              model_class(num_classes=args["num_classes"],
                          backbone_config=checkpoint["model_config"]["backbone_config"],
                          interaction_config=checkpoint["model_config"]["interaction_config"])
@@ -98,6 +105,8 @@ def main():
         raise ValueError("Checkpoint architecture does not match this model version")
     model.load_state_dict(checkpoint["model"], strict=True)
     model = model.to(device).eval()
+    if action_routed and options.interaction_mode == "none":
+        model.interaction_strength.zero_()
     archive = options.archive or Path(args["archive"])
     if not archive.is_absolute():
         archive = ROOT / archive
@@ -123,6 +132,7 @@ def main():
     if class_routed:
         route_keys = ["hand_called", "hand_requirement", "body_confidence"]
     route_sums = {name: np.zeros(k, dtype=np.float64) for name in route_keys}
+    interaction_sums = {}
     errors = []
     offset = 0
     loss_sum = 0.
@@ -135,9 +145,22 @@ def main():
             x, labels, mask = (value.to(device, non_blocking=device.type == "cuda") for value in (x, labels, mask))
             if class_routed:
                 output = model(x, mask, hand_mode=options.hand_mode, return_routing=True)
+            elif action_routed:
+                output = model(x, mask, return_routing=True)
             else:
                 output = model(x, mask, return_routing=True) if routed else model(x, mask)
-            logits = output["logits"] if routed or class_routed else output
+            logits = output["logits"] if routed or class_routed or action_routed else output
+            if action_routed:
+                metrics = {
+                    "baseline_correct": (output["baseline_logits"].argmax(1) == labels).sum().item(),
+                    "correction_l2_sum": output["correction"].norm(dim=1).sum().item(),
+                    "encoded_edges": output["edges"].shape[0],
+                }
+                for r, name in enumerate(output["region_names"]):
+                    metrics[f"enabled_{name}"] = output["region_enabled"][:, r].sum().item()
+                    metrics[f"active_{name}"] = output["region_active"][:, r].sum().item()
+                for name, value in metrics.items():
+                    interaction_sums[name] = interaction_sums.get(name, 0.0) + value
             if not torch.isfinite(logits).all():
                 raise RuntimeError(f"Nonfinite logits at batch {step}")
             loss_sum += torch.nn.functional.cross_entropy(logits, labels, reduction="sum").item()
@@ -193,6 +216,8 @@ def main():
             **{f"mean_{name}": float(values[i] / support[i]) if support[i] else None for name, values in route_sums.items()},
         })
     detail_name = f"best_details_{options.hand_mode}" if class_routed else "best_details"
+    if action_routed:
+        detail_name = f"best_details_interaction_{options.interaction_mode}"
     out = options.output_dir or checkpoint_path.parent / detail_name
     out.mkdir(parents=True, exist_ok=True)
     write_csv(out / "per_class_accuracy.csv", rows, list(rows[0]))
@@ -234,6 +259,14 @@ def main():
     if class_routed:
         summary["hand_mode"] = options.hand_mode
         summary["hand_call_rate"] = float(route_sums["hand_called"].sum() / offset)
+    if action_routed:
+        summary["interaction_mode"] = options.interaction_mode
+        summary["interaction_config"] = checkpoint["model_config"]["interaction_config"]
+        summary["interaction_diagnostics"] = {
+            **{name: value / offset for name, value in interaction_sums.items()},
+            "baseline_top1_percent": 100 * interaction_sums["baseline_correct"] / offset,
+            "note": "baseline is the co-trained path, not an independently trained original checkpoint",
+        }
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("RESULT " + json.dumps(summary, ensure_ascii=False), flush=True)
     print(f"Artifacts saved to {out}", flush=True)

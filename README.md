@@ -285,3 +285,13 @@ python train_hand_body_proximity.py --dry-run --device cpu --window-size 9 --num
 python train_best_hand_body_proximity.py --device cuda
 python train_best_hand_body_proximity.py --dry-run --device cpu --window-size 9 --num-workers 0 --no-compile
 ```
+
+## 新增动作候选控制的手—身体交互
+
+独立变体 `best-action-hand-body` 完整保留原最佳模型及双手距离/方向，新增动作候选概率与距离共同控制的交互修正。从随机初始化训练：前 5 epoch 训练原路径，第 6–15 epoch 逐步接入交互，之后联合训练。推理仅对候选区域的近邻节点编码，每只手保留 21 点。配置及训练/消融说明见 [动作候选交互方案](docs/best_action_hand_body.md)。
+
+```bash
+python train_best_action_hand_body.py --device cuda
+```
+
+输出写入 `outputs/best_action_hand_body_ntu60_xsub`。旧实验全部保留，新入口拒绝加载旧权重；默认 eager，并记录交互梯度、修正幅度及区域启用率。

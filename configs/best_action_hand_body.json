@@ -1,0 +1,24 @@
+{
+  "width": 64,
+  "radius_on": 0.4,
+  "radius_off": 0.48,
+  "confidence_threshold": 0.0,
+  "candidate_threshold": 0.15,
+  "temperature": 1.0,
+  "exploration_floor": 0.1,
+  "baseline_epochs": 5,
+  "ramp_epochs": 10,
+  "baseline_loss_weight": 0.5,
+  "auxiliary_loss_weight": 0.2,
+  "interaction_weight_decay": 0.00001,
+  "region_actions": {
+    "head_face": [1, 2, 3, 4, 18, 19, 20, 21, 28, 32, 37, 38, 41, 44, 47, 48],
+    "torso": [14, 15, 25, 40, 45, 46],
+    "left_arm": [14, 15, 40],
+    "right_arm": [14, 15, 40],
+    "left_leg": [16, 17],
+    "right_leg": [16, 17],
+    "left_foot": [16, 17],
+    "right_foot": [16, 17]
+  }
+}
