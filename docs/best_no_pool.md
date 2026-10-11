@@ -48,7 +48,9 @@
 
 ## 训练与评估
 
-独立入口复用原有 NTU60 XSub 训练设定：65 轮、batch 32、SGD、学习率 0.1、5 轮预热、衰减节点 35/55、seed 1。所有参数随机初始化并联合训练，强制启用项目现有 torch.compile 配置，专用入口和通用入口均拒绝 `--no-compile`。编译失败报错，不回退整模型 eager。编译范围为身体/手部编码器和新增节点、时间、人物读出；原最佳面部 `LocalSTBlock` 已有的 eager 边界保留。
+独立入口采用 NTU60 XSub 训练设定：65 轮、batch 32、SGD、峰值学习率 **0.025**、5 轮预热、衰减节点 35/55、seed 1。因原 0.1 峰值学习率的续训出现明显退化，此变体的专用和通用入口均将默认学习率降低为原来的四分之一，仍允许显式 `--lr` 覆盖。新增全模型梯度 L2 裁剪，默认 `--max-grad-norm 5`，在梯度累积完成后、SGD 更新前执行，并拒绝非有限梯度。此变体不能将裁剪阈值设为 0。其他旧模型的默认训练方式不变。模型结构、参数量和分类前无池化读出不变。
+
+首次训练所有参数随机初始化并联合训练，强制启用 torch.compile，专用入口和通用入口均拒绝 `--no-compile`。此变体默认使用 `mode="default"` 的 Inductor 编译，不使用 `reduce-overhead` 模式的 CUDA Graphs；其他旧模型的默认模式仍是 reduce-overhead。编译失败报错，不回退整模型 eager。编译范围为身体/手部编码器和新增节点、时间、人物读出；原最佳面部 `LocalSTBlock` 已有的 eager 边界保留。梯度检查及裁剪属于优化器步骤，不改变网络编译范围。
 
 ```bash
 python train_best_no_pool.py --device cuda
@@ -70,12 +72,44 @@ python tools/evaluate_best.py --checkpoint outputs/best_no_pool_ntu60_xsub/<run-
 
 `window_size`、`max_persons` 和读出顺序记录在 checkpoint 的 `model_config.readout_config` 中；评估自动按该配置重建模型。改变窗口长度或最大人数会改变读出参数形状，需要重新训练。训练入口不接受 `--init-checkpoint`、`--gcn-config` 或交互配置。
 
+### 数值异常与续训
+
+2026-10-12 的完整训练在第 3 轮第 658 批遇到非有限 loss，第 2 轮 `last.pt` 仍完整。单凭这条错误无法确定是梯度爆炸、输入还是中间计算导致；旧程序没有记录失败批次的输入或梯度，不能据此声称已经确定根因。
+
+保持原 reduce-overhead 模式、从 seed 1 重跑的诊断在第 2 轮出现 CUDA illegal memory access，终止于底层 CUDA/pinned allocator。该报错与原非有限 loss 不同，不能确定来自同一原因；它支持避免该环境下的 CUDA Graphs 路径。默认编译模式改为 default，仍执行 Inductor 编译前向和反向。
+
+仅增加裁剪、改用 default 编译模式后，从原第 2 轮检查点按原 0.1 峰值学习率续训至第 6 轮：未出现非有限值，但验证 Top-1 依次为 64.82%、60.33%、53.19%、18.10%，第 6 轮验证 loss 达 14.4656。因此“没有 NaN”不能当作训练收敛正常的证据，不推荐从这组第 6 轮权重继续。第 3 轮更新前梯度范数中位数为 3.04、最大为 83.95，共 40/1238 批触发阈值 5 的裁剪；这支持限制梯度尖峰，但不能证明原 NaN 的唯一原因。
+
+随后重新从原第 2 轮检查点恢复，以学习率 0.025、关闭预热（仅此诊断）、default 编译及裁剪阈值 5 完整训练和评估第 3、4 轮。验证 Top-1 分别为 **75.90%、78.88%**，验证 loss 为 0.8186、0.6806；第 4 轮训练准确率为 82.76%。两轮分别有 6/1238、3/1238 批触发裁剪，更新前梯度范数最大值为 15.47、5.94。第 4 轮检查点的模型和 SGD 动量均为有限值。这是早期续训验证，尚未证明完整 65 轮的稳定性或最终准确率。
+
+新程序记录更新前的 `gradient_norm`，并在 loss 或梯度范数非有限时保存 `failure.pt`（输入、标签、mask、logits、模型、优化器和梯度）后报错。发生异常时也会把本轮此前成功完成的批次写入 `batches.jsonl`；不会跳过异常批次或把 NaN 换成零继续更新。
+
+可以从同一无池化模型的完整轮末检查点继续，不加载原最佳模型权重：
+
+```bash
+python train_best_no_pool.py --device cuda \
+  --resume-checkpoint outputs/best_no_pool_ntu60_xsub/20261012-004010-e0c65ff8/last.pt
+```
+
+恢复模型、SGD 动量和轮数；上述检查点从第 3 轮继续到总计第 65 轮，按请求的峰值学习率（新默认 0.025）及真实轮数计算预热和衰减；第 3、4、5 轮分别为 0.015、0.02、0.025。验证架构、类别、窗口、人物槽位、数据划分及特征模式一致，并拒绝非有限检查点。新日志保存到新的 run 目录，旧检查点不覆盖。续训目录的最佳候选包含所提供的轮末检查点和之后新完成的轮次；不自动查找其他历史 best.pt。旧检查点没有保存 shuffle/crop 随机状态，续训不保证逐批完全相同。
+
+服务器已有上述低学习率对照的完整第 4 轮检查点，建议从它继续：
+
+```bash
+python train_best_no_pool.py --device cuda \
+  --resume-checkpoint outputs/no_pool_lower_lr_verification/20261012-014649-4ebd9683/last.pt
+```
+
+该命令从第 5 轮继续至第 65 轮，采用新默认学习率 0.025；默认 5 轮预热在第 5 轮达到峰值，与对照的学习率衔接。
+
 ## 已验证与待验证
 
 已验证原始与八通道缓存输入的骨干输入/输出与原最佳逐项一致；读出能区分节点和时间顺序；缺失分支、空人物槽位、非有限输入及帧 mask 可正常处理；所有实际编码器和新读出均获得梯度；小型 ZIP 完成训练、保存、重新加载及统一评估。默认 64 帧、2 人、60 类的 CPU 前向通过。
 
-本地 Windows/PyTorch 2.1 不支持编译的测试会显式跳过；在支持编译的环境执行小型 ZIP 编译训练、保存、重载和评估。可设置 `ISAA_TEST_DEVICE=cuda` 执行 CUDA 编译测试。尚未开始全量训练；不能把原最佳的 93.0946% 作为新变体的准确率。
+本地 Windows/PyTorch 2.1 不支持编译的测试会显式跳过；在支持编译的环境执行小型 ZIP 编译训练、保存、重载、评估和续训。可设置 `ISAA_TEST_DEVICE=cuda` 执行 CUDA 编译测试。已开始全量训练，最终准确率尚未验证；不能把原最佳的 93.0946% 作为新变体的准确率。
+
+2026-10-12 在 RTX A6000、PyTorch 2.14.0+cu130 上，以 `ISAA_TEST_DEVICE=cuda` 执行 `tests.test_best_no_pool` 和 `tests.test_no_pool_training_stability`：最终学习率默认值 0.025 版本的 12 项全部通过，含默认编译模式的真实 CUDA 前向、反向、保存重载、统一评估及续训；非有限梯度会在 SGD 更新前报错并保存快照。
 
 ```bash
-python -m unittest tests.test_best_no_pool tests.test_wide_relative_routed_model tests.test_train_ablation_stages -v
+python -m unittest tests.test_best_no_pool tests.test_no_pool_training_stability tests.test_wide_relative_routed_model tests.test_train_ablation_stages -v
 ```

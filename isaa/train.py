@@ -154,6 +154,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-batch-size", type=int, default=32)
     parser.add_argument("--grad-accum-steps", type=int, default=1,
                         help="Gradient accumulation steps; keeps effective batch size when full RTMW baseline is memory-bound")
+    parser.add_argument("--max-grad-norm", type=float, default=None,
+                        help="Global gradient L2 limit before SGD; default 5 for best-no-pool, 0 otherwise")
+    parser.add_argument("--resume-checkpoint", default=None,
+                        help="Continue a matching best-no-pool run with model, SGD momentum and epoch restored")
     parser.add_argument("--epochs", type=int, default=65)
     parser.add_argument("--main-only", action=argparse.BooleanOptionalAction, default=None,
                         help="Legacy ISAA switch; BodyLocalFusion always uses the full RTMW-133 input")
@@ -166,10 +170,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--native-bn", action=argparse.BooleanOptionalAction, default=None,
                         help="Use native BatchNorm2d for the legacy ISAA main-only model")
     parser.add_argument("--compile-mode", choices=("default", "reduce-overhead", "max-autotune"),
-                        default="reduce-overhead")
+                        default=None, help="default for best-no-pool; reduce-overhead for other variants")
     parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True,
                         help="Use torch.compile; --no-compile skips first-batch graph compilation")
-    parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Base SGD learning rate; default 0.025 for best-no-pool, 0.1 otherwise")
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--nesterov", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--weight-decay", type=float, default=0.0004)
@@ -302,6 +307,18 @@ def parse_args() -> argparse.Namespace:
             parser.error("best-no-pool requires torch.compile; --no-compile is not allowed")
         if args.feature_mode != "raw":
             parser.error("best-no-pool requires raw x/y/score or the original eight-channel cache")
+    if args.max_grad_norm is None:
+        args.max_grad_norm = 5.0 if args.model_variant == NO_POOL_VARIANT else 0.0
+    if args.compile_mode is None:
+        args.compile_mode = "default" if args.model_variant == NO_POOL_VARIANT else "reduce-overhead"
+    if args.lr is None:
+        args.lr = 0.025 if args.model_variant == NO_POOL_VARIANT else 0.1
+    if not 0 <= args.max_grad_norm < float("inf"):
+        parser.error("max-grad-norm must be finite and nonnegative")
+    if args.model_variant == NO_POOL_VARIANT and args.max_grad_norm == 0:
+        parser.error("best-no-pool requires a positive max-grad-norm")
+    if args.resume_checkpoint and (args.model_variant != NO_POOL_VARIANT or args.init_checkpoint):
+        parser.error("--resume-checkpoint requires best-no-pool and cannot be combined with --init-checkpoint")
     if args.model_variant == ACTION_PROXIMITY_VARIANT:
         if not args.compile or "--no-compile" in sys.argv[1:]:
             parser.error("best-action-hand-body requires torch.compile; --no-compile is not allowed")
@@ -397,6 +414,26 @@ def run_epoch(
     record_host_seconds = []
     underlying = getattr(model, "_orig_mod", model)
     action_interaction = isinstance(underlying, BestActionHandBodyFusion)
+    max_grad_norm = float(progress_context.get("max_grad_norm", 5.0 if isinstance(underlying, BestNoPoolFusion) else 0.0))
+    gradient_values = (torch.empty(total_steps, device=device) if records is not None and training and max_grad_norm > 0 else None)
+    recorded_batches = 0
+    phase = "train" if training else "val"
+
+    def save_failure(reason, step, x, labels, frame_mask):
+        if records is not None:
+            temporary = records.directory / "failure.pt.tmp"
+            torch.save({"reason": reason, "epoch": epoch, "phase": phase, "step": step,
+                        "model": underlying.state_dict(),
+                        "optimizer": optimizer.state_dict() if training else None,
+                        "gradients": {name: p.grad.detach().cpu() for name, p in underlying.named_parameters()
+                                      if p.grad is not None} if training else {},
+                        "logits": logits.detach().cpu(),
+                        "x": x.detach().cpu(), "labels": labels.detach().cpu(),
+                        "frame_mask": frame_mask.detach().cpu()}, temporary)
+            temporary.replace(records.directory / "failure.pt")
+            records.state["failure_batch"] = {"epoch": epoch, "phase": phase, "step": step,
+                                               "snapshot": "failure.pt", "reason": reason}
+
     interaction_rows = []
     try:
         with torch.set_grad_enabled(training):
@@ -418,6 +455,7 @@ def run_epoch(
                     logits = model(x, frame_mask)
                     loss = criterion(logits, labels)
                 if not torch.isfinite(loss):
+                    save_failure("nonfinite_loss", step, x, labels, frame_mask)
                     raise RuntimeError(f"Non-finite loss at batch {step}")
                 if training:
                     group_size = min(grad_accum_steps,
@@ -428,6 +466,13 @@ def run_epoch(
                                      if name.startswith("interaction.") and p.grad is not None]
                         gradient_norm = torch.stack(gradients).sum().sqrt() if gradients else loss.new_zeros(())
                     if step % grad_accum_steps == 0 or step == total_steps:
+                        if max_grad_norm > 0:
+                            try:
+                                gradient_norm_all = nn.utils.clip_grad_norm_(
+                                    underlying.parameters(), max_grad_norm, error_if_nonfinite=True)
+                            except RuntimeError:
+                                save_failure("nonfinite_gradient_norm", step, x, labels, frame_mask)
+                                raise
                         optimizer.step()
                 count = labels.size(0)
                 # Keep metrics on device until epoch end. Preserve the fail-fast loss check above.
@@ -457,6 +502,10 @@ def run_epoch(
                         (loss.detach(), correct.float(), correct_top5.float())))
                     record_wait.append(batch_wait)
                     record_host_seconds.append(time.perf_counter() - batch_started)
+                    if gradient_values is not None:
+                        gradient_values[step - 1] = (gradient_norm_all if
+                            step % grad_accum_steps == 0 or step == total_steps else float("nan"))
+                    recorded_batches += 1
                 now = time.perf_counter()
                 if step == 1 or now - last_refresh >= log_interval:
                     total_completed = min(completed_before + step, total_units)
@@ -476,22 +525,26 @@ def run_epoch(
                 min(completed_before + total_steps, total_units), total_units, now - run_started_at
             ),
         ))
+    finally:
         if records is not None:
-            values = record_values[:total].cpu().tolist()
-            phase = "train" if training else "val"
+            # Flush successful batches even when the next forward/backward fails.
+            values = record_values[:recorded_batches].cpu().tolist()
+            norms = gradient_values[:recorded_batches].cpu().tolist() if gradient_values is not None else None
             for index, (batch_loss, batch_correct, batch_top5) in enumerate(values):
                 count = int(loader.batch_size or 1)
                 if index == total_steps - 1 and total_steps * count != total:
                     count = total - index * count
-                records.batch({
+                row = {
                     "epoch": epoch, "phase": phase, "step": index + 1,
                     "global_step": (epoch - 1) * total_steps + index + 1,
                     "samples": count, "loss": batch_loss, "top1": batch_correct / count,
                     "top5": batch_top5 / count, "lr": learning_rate,
                     "data_wait_seconds": record_wait[index],
                     "host_batch_seconds": record_host_seconds[index],
-                })
-    finally:
+                }
+                if norms is not None and ((index + 1) % grad_accum_steps == 0 or index + 1 == total_steps):
+                    row.update(gradient_norm=norms[index], max_grad_norm=max_grad_norm)
+                records.batch(row)
         finish_progress_lines()
     extra_metrics = {}
     if interaction_rows:
@@ -742,6 +795,13 @@ def _run(args, save_dir, records) -> None:
         else:
             model.load_state_dict(initial_checkpoint["model"], strict=True)
         records.update_config(initial_checkpoint=str(args.init_checkpoint))
+    resume_checkpoint = None
+    if args.resume_checkpoint:
+        from isaa.utils.no_pool_resume import load_resume_checkpoint
+        resume_checkpoint = load_resume_checkpoint(args.resume_checkpoint, model, args)
+        records.update_config(resume={"checkpoint": str(Path(args.resume_checkpoint).resolve()),
+                                     "completed_epoch": resume_checkpoint["epoch"],
+                                     "random_state": "old loader shuffle/crop state is not restored"})
     temporal_augmented = args.model_variant == "body-local-time-aug"
     coordinate_augmented = args.model_variant == "body-local-coord-aug"
     temporal_augmentation_config = {
@@ -776,6 +836,7 @@ def _run(args, save_dir, records) -> None:
                           optimizer={"name": "SGD", "base_lr": args.lr, "momentum": args.momentum,
                                      "nesterov": args.nesterov, "weight_decay": args.weight_decay,
                                      "grad_accum_steps": args.grad_accum_steps,
+                                     "max_grad_norm": args.max_grad_norm,
                                      "effective_batch_size": args.batch_size * args.grad_accum_steps},
                           main_joint_indices=(model.main_joint_indices.cpu().tolist()
                                               if hasattr(model, "main_joint_indices") else None),
@@ -851,6 +912,8 @@ def _run(args, save_dir, records) -> None:
     print(f"optimizer: SGD lr={args.lr} momentum={args.momentum} nesterov={args.nesterov} "
           f"weight_decay={args.weight_decay} warmup={args.warmup_epochs} "
           f"steps_zero_based={args.lr_steps} decay={args.lr_decay} epochs={args.epochs}", flush=True)
+    if args.max_grad_norm:
+        print(f"optimizer: global gradient L2 clipping max_norm={args.max_grad_norm}; nonfinite gradients fail before SGD", flush=True)
     print(f"records: {save_dir}", flush=True)
     if device.type == "cuda":
         print(f"runtime: gpu={torch.cuda.get_device_name(device)} tf32={args.tf32} "
@@ -1028,11 +1091,25 @@ def _run(args, save_dir, records) -> None:
                                 nesterov=args.nesterov, weight_decay=args.weight_decay)
     best_accuracy = -1.0
     best_epoch = 0
+    start_epoch = 1
+    if resume_checkpoint is not None:
+        optimizer.load_state_dict(resume_checkpoint["optimizer"])
+        for group in optimizer.param_groups:
+            group.update(momentum=args.momentum, nesterov=args.nesterov, weight_decay=args.weight_decay)
+        start_epoch = resume_checkpoint["epoch"] + 1
+        # The supplied epoch-end checkpoint is also a valid candidate for this continuation's best.
+        best_accuracy, best_epoch = resume_checkpoint["val_accuracy"], resume_checkpoint["epoch"]
+        records.state.update(last_completed_epoch=resume_checkpoint["epoch"], best_epoch=best_epoch,
+                             best_val_acc=best_accuracy)
+        records.finish("running")
+        torch.save(resume_checkpoint, save_dir / "last.pt")
+        torch.save(resume_checkpoint, save_dir / "best.pt")
+        print(f"resume: restored model and SGD momentum; next_epoch={start_epoch}; new records={save_dir}", flush=True)
     training_started_at = time.perf_counter()
     train_steps = len(loaders["train"])
     steps_per_epoch = train_steps + len(loaders["val"])
-    total_run_steps = steps_per_epoch * args.epochs
-    for epoch in range(1, args.epochs + 1):
+    total_run_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
+    for epoch in range(start_epoch, args.epochs + 1):
         if args.model_variant == ACTION_PROXIMITY_VARIANT:
             model.set_training_epoch(epoch)
         if args.model_variant == "isaa":
@@ -1041,12 +1118,13 @@ def _run(args, save_dir, records) -> None:
                                             args.lr_steps, args.lr_decay)
         for group in optimizer.param_groups:
             group["lr"] = learning_rate
-        completed_before = (epoch - 1) * steps_per_epoch
+        completed_before = (epoch - start_epoch) * steps_per_epoch
         progress_context = {
             "run_started_at": training_started_at,
             "total_units": total_run_steps,
             "completed_before": completed_before,
             "grad_accum_steps": args.grad_accum_steps,
+            "max_grad_norm": args.max_grad_norm,
         }
         finish_progress_lines()
         if args.model_variant == "original":
@@ -1108,7 +1186,7 @@ def _run(args, save_dir, records) -> None:
             records=records, epoch=epoch, learning_rate=learning_rate,
         )
         total_elapsed = time.perf_counter() - training_started_at
-        completed_steps = epoch * steps_per_epoch
+        completed_steps = (epoch - start_epoch + 1) * steps_per_epoch
         remaining_seconds = estimate_eta(total_elapsed, completed_steps, total_run_steps - completed_steps)
         print(format_timestamped_lines(
             f"epoch={epoch}",

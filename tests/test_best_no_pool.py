@@ -111,6 +111,10 @@ class BestNoPoolTests(unittest.TestCase):
         self.assertEqual((args.node_count, args.feature_mode), (133, 'raw'))
         self.assertIsNone(args.init_checkpoint)
         self.assertIsNone(args.gcn_config)
+        self.assertEqual(args.max_grad_norm, 5.0)
+        self.assertEqual(args.compile_mode, 'default')
+        self.assertEqual(args.lr, 0.025)
+        self.assertIsNone(args.resume_checkpoint)
         self.assertEqual(args.save_dir, 'outputs/best_no_pool_ntu60_xsub')
         model = BestNoPoolFusion(7, window_size=5)
         for x in (torch.zeros(2, 3, 4, 133, 2), torch.zeros(2, 3, 5, 133, 3),
@@ -119,6 +123,14 @@ class BestNoPoolTests(unittest.TestCase):
                 model(x)
         with self.assertRaises(ValueError):
             training_arguments(['--init-checkpoint', 'best.pt'])
+        with patch.object(sys, 'argv', ['main.py', '--model-variant', NO_POOL_VARIANT]):
+            generic = parse_args()
+        self.assertEqual((generic.lr, generic.compile_mode, generic.max_grad_norm), (0.025, 'default', 5.))
+        with patch.object(sys, 'argv', ['main.py', '--model-variant', 'body-local-hand-ctr-wide-relative']):
+            baseline = parse_args()
+        self.assertEqual((baseline.lr, baseline.compile_mode, baseline.max_grad_norm), (0.1, 'reduce-overhead', 0.))
+        with patch.object(sys, 'argv', ['main.py'] + training_arguments(['--lr', '0.05'])):
+            self.assertEqual(parse_args().lr, 0.05)
 
     def test_compile_required_in_both_entries(self):
         with patch.object(sys, 'argv', ['main.py'] + training_arguments([])):
@@ -162,7 +174,10 @@ class BestNoPoolTests(unittest.TestCase):
             run_config = json.loads((run / 'config.json').read_text(encoding='utf-8'))
             self.assertTrue(run_config['compile']['enabled'])
             self.assertTrue(run_config['compile']['required'])
+            self.assertEqual(run_config['compile']['mode'], 'default')
             self.assertFalse(run_config['compile']['suppress_errors'])
+            self.assertEqual(run_config['optimizer']['max_grad_norm'], 5.0)
+            self.assertEqual(run_config['optimizer']['base_lr'], 0.025)
             self.assertEqual(checkpoint['architecture'], BestNoPoolFusion.ARCHITECTURE)
             config = checkpoint['model_config']['readout_config']
             self.assertEqual((config['window_size'], config['max_persons']), (5, 1))
@@ -178,6 +193,16 @@ class BestNoPoolTests(unittest.TestCase):
             summary = json.loads((directory / 'evaluation/summary.json').read_text(encoding='utf-8'))
             self.assertEqual(summary['samples'], 3)
             self.assertTrue(summary['same_top1_correct_count'])
+            continuation = command.copy()
+            continuation[continuation.index('--epochs') + 1] = '2'
+            continuation += ['--resume-checkpoint', str(run / 'last.pt')]
+            resumed = subprocess.run(continuation, cwd=root, env=env, capture_output=True, text=True, timeout=600)
+            self.assertEqual(resumed.returncode, 0, resumed.stdout[-3000:] + resumed.stderr[-3000:])
+            self.assertIn('next_epoch=2', resumed.stdout)
+            resumed_run = next(p for p in (directory / 'runs').iterdir() if p != run)
+            saved = torch.load(resumed_run / 'last.pt', map_location='cpu', weights_only=False)
+            self.assertEqual(saved['epoch'], 2)
+            self.assertEqual(saved['args']['max_grad_norm'], 5.0)
 
 
 if __name__ == '__main__':

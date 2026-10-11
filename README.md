@@ -306,6 +306,6 @@ python train_best_no_pool.py --device cuda
 python train_best_no_pool.py --dry-run --device cuda --num-workers 0
 ```
 
-该入口从头独立训练，输出保存到 `outputs/best_no_pool_ntu60_xsub/`。评估工具按 checkpoint 中记录的窗口与人物槽位配置重建模型。
+该入口默认从头独立训练，输出保存到 `outputs/best_no_pool_ntu60_xsub/`。强制启用 torch.compile（此变体默认 mode=default），默认峰值学习率降为 0.025，并在 SGD 更新前检查梯度与进行 L2 裁剪（默认阈值 5）。可使用 `--resume-checkpoint <同模型轮末last.pt>` 恢复模型、SGD 动量及轮数；新记录写到新目录。评估工具按 checkpoint 中记录的窗口与人物槽位配置重建模型。
 
 训练强制启用 `torch.compile`，拒绝 `--no-compile`；编译失败报错。新增读出参与编译，保留原最佳面部 `LocalSTBlock` 的编译边界。`--dry-run` 仅检查形状，不验证编译训练。
