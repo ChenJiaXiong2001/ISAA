@@ -121,6 +121,7 @@ def main():
         window_size=args["window_size"], num_joints=133,
         num_classes=args["num_classes"], layout="rtmw_133",
         max_persons=args["max_persons"], feature_mode=args["feature_mode"],
+        temporal_compression=args.get("temporal_compression", "none"),
         max_samples=args.get("max_samples", 0), augment=False,
     )
     batch_size = options.batch_size or args["test_batch_size"]
@@ -255,8 +256,11 @@ def main():
         "difference_percentage_points": 100*(actual-checkpoint["val_accuracy"]),
         "same_top1_correct_count": int(round(checkpoint["val_accuracy"]*offset)) == int(correct.sum()),
         "protocol": {"window_size": args["window_size"], "max_persons": args["max_persons"],
-                     "crop": "center", "augmentation": False, "batch_size": batch_size,
-                     "compile": False, "tf32": args.get("tf32", True), "max_samples": args.get("max_samples", 0)},
+                     "crop": ("compressed_full_sequence" if args.get("temporal_compression", "none") == "confidence_weighted" else "center"),
+                     "temporal_compression": args.get("temporal_compression", "none"),
+                     "augmentation": False, "batch_size": batch_size,
+                     "compile": False,
+                     "tf32": args.get("tf32", True), "max_samples": args.get("max_samples", 0)},
         "runtime": {"torch": torch.__version__, "device": str(device), "seconds": time.perf_counter()-started},
         "mean_routing": {name: float(values.sum()/offset) for name, values in route_sums.items()},
         "worst_10": ranked[:10], "best_10": list(reversed(ranked[-10:])),

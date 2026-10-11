@@ -112,6 +112,7 @@ NTU120_XSUB_TRAIN_SUBJECTS = frozenset(
 )
 SUPPORTED_RTMW_SPLIT_PROTOCOLS = frozenset({"xsub60", "xset60", "xsub120", "xset120"})
 SUPPORTED_RTMW_SCORE_NORMALIZATIONS = frozenset({"auto", "clip", "sigmoid"})
+SUPPORTED_RTMW_TEMPORAL_COMPRESSIONS = frozenset({"none", "confidence_weighted"})
 
 _SAMPLE_NAME_PATTERN = re.compile(
     r"(?:^|/)S(?P<setup>\d{3})C\d{3}P(?P<subject>\d{3})R\d{3}A(?P<action>\d{3})_rgb\.npz$",
@@ -219,6 +220,73 @@ def _normalize_scores(scores: np.ndarray, normalization: str) -> np.ndarray:
     return np.clip(scores, 0.0, 1.0).astype(np.float32, copy=False)
 
 
+def _confidence_weighted_temporal_compress(
+    raw: torch.Tensor,
+    frame_mask: torch.Tensor | None,
+    target_frames: int,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Compress a complete sequence into temporal bins using point confidence.
+
+    ``raw`` has shape ``3 x T x N x M`` and contains ``x, y, score``.  Every
+    bin covers a contiguous part of the original sequence.  Coordinates are
+    weighted by their per-point confidence, while the output confidence is the
+    ordinary mean confidence in that bin.  Sequences no longer than the target
+    are returned unchanged so the existing pad-and-mask path can preserve all
+    original frames.
+    """
+    target_frames = int(target_frames)
+    if target_frames <= 0:
+        raise ValueError(f"target_frames 必须是正整数，当前为 {target_frames}")
+    if raw.ndim != 4 or raw.size(0) < 3:
+        raise ValueError(f"raw 必须是 3 x T x N x M，当前为 {tuple(raw.shape)}")
+    frames = raw.size(1)
+    if frames <= target_frames:
+        return raw.contiguous(), None if frame_mask is None else frame_mask.bool().contiguous()
+
+    # Floor boundaries partition every input frame into exactly one bin.
+    starts = torch.floor(
+        torch.arange(target_frames, device=raw.device, dtype=torch.float64) * frames / target_frames
+    ).to(torch.long)
+    ends = torch.floor(
+        torch.arange(1, target_frames + 1, device=raw.device, dtype=torch.float64) * frames / target_frames
+    ).to(torch.long)
+
+    coords = raw[:2]
+    scores = raw[2:3].clamp(0.0, 1.0)
+    weighted_coords = coords * scores
+    coord_prefix = torch.cat(
+        [weighted_coords.new_zeros(2, 1, *weighted_coords.shape[2:]), weighted_coords.cumsum(dim=1)],
+        dim=1,
+    )
+    score_prefix = torch.cat(
+        [scores.new_zeros(1, 1, *scores.shape[2:]), scores.cumsum(dim=1)],
+        dim=1,
+    )
+    coord_sum = coord_prefix.index_select(1, ends) - coord_prefix.index_select(1, starts)
+    score_sum = score_prefix.index_select(1, ends) - score_prefix.index_select(1, starts)
+    coords_out = coord_sum / score_sum.clamp_min(1e-6)
+    coords_out = torch.where(score_sum > 1e-6, coords_out, torch.zeros_like(coords_out))
+    lengths = (ends - starts).to(dtype=raw.dtype).view(1, target_frames, 1, 1)
+    scores_out = score_sum / lengths
+    compressed = torch.cat((coords_out, scores_out), dim=0).contiguous()
+
+    if frame_mask is None:
+        compressed_mask = None
+    else:
+        mask = frame_mask.flatten().bool().to(device=raw.device)
+        if mask.numel() != frames:
+            raise ValueError(
+                f"frame_mask 长度 {mask.numel()} 与 raw 帧数 {frames} 不一致"
+            )
+        mask_prefix = torch.cat(
+            [torch.zeros(1, dtype=torch.int64, device=raw.device), mask.to(torch.int64).cumsum(dim=0)]
+        )
+        compressed_mask = (
+            mask_prefix.index_select(0, ends) - mask_prefix.index_select(0, starts) > 0
+        ).contiguous()
+    return compressed, compressed_mask
+
+
 class RTMWZipDataset(Dataset):
     """Stream RTMW-133 samples from an NTU120 archive.
 
@@ -243,6 +311,7 @@ class RTMWZipDataset(Dataset):
         augment: bool = False,
         augmentation_config: dict[str, Any] | None = None,
         deterministic_temporal_crop: str = "center",
+        temporal_compression: str = "none",
         max_samples: int = 0,
     ) -> None:
         path = Path(archive_path)
@@ -264,6 +333,12 @@ class RTMWZipDataset(Dataset):
         deterministic_temporal_crop = str(deterministic_temporal_crop).strip().lower()
         if deterministic_temporal_crop not in {"start", "center", "end"}:
             raise ValueError("deterministic_temporal_crop 只支持 start/center/end")
+        temporal_compression = str(temporal_compression).strip().lower()
+        if temporal_compression not in SUPPORTED_RTMW_TEMPORAL_COMPRESSIONS:
+            raise ValueError(
+                "temporal_compression 只支持 none/confidence_weighted，"
+                f"当前为 {temporal_compression!r}"
+            )
 
         all_samples = scan_rtmw_archive(path)
         want_train = split == "train"
@@ -305,6 +380,7 @@ class RTMWZipDataset(Dataset):
         self.augment = bool(augment)
         self.augmentation_config = augmentation_config or {}
         self.deterministic_temporal_crop = deterministic_temporal_crop
+        self.temporal_compression = temporal_compression
         self._archive: zipfile.ZipFile | None = None
         self._archive_pid: int | None = None
 
@@ -389,6 +465,13 @@ class RTMWZipDataset(Dataset):
         raw, file_mask = self._read_raw_sample(index)
         raw = _align_joint_count(raw, expected_num_joints=self.num_joints)
         random_crop = self.augment and bool(self.augmentation_config.get("random_temporal_crop", False))
+        if self.temporal_compression == "confidence_weighted":
+            raw, file_mask = _confidence_weighted_temporal_compress(
+                raw, file_mask, self.window_size
+            )
+            # Compression already represents the complete action.  Cropping it
+            # again would discard temporal content, so only pad short results.
+            random_crop = False
         raw, valid_frame_mask = _temporal_crop_or_pad_sample_with_mask(
             raw,
             file_mask,

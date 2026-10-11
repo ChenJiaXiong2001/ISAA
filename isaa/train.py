@@ -150,6 +150,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-main-nodes", type=int, default=None,
                         help="Backward-compatible alias for --node-count in ISAA main-only runs")
     parser.add_argument("--window-size", type=int, default=64)
+    parser.add_argument(
+        "--temporal-compression",
+        choices=("none", "confidence_weighted"),
+        default="none",
+        help="将完整动作按关键点置信度加权压缩到 window-size 帧",
+    )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--test-batch-size", type=int, default=32)
     parser.add_argument("--grad-accum-steps", type=int, default=1,
@@ -854,7 +860,9 @@ def _run(args, save_dir, records) -> None:
                                                       (["x", "y", "score"] if args.feature_mode == "raw"
                                                        else ["relative_x", "relative_y", "score"]))),
                                          "crop": ("precomputed fixed window" if args.npy_dir else
-                                                  "random fixed window / center validation, pad short clips"),
+                                                  ("confidence-weighted full-sequence compression / pad short clips"
+                                                   if args.temporal_compression == "confidence_weighted" else
+                                                   "random fixed window / center validation, pad short clips")),
                                          "augmentation": ({
                                              "enabled": True,
                                              "random_temporal_crop": temporal_augmented,
@@ -1057,6 +1065,7 @@ def _run(args, save_dir, records) -> None:
                 window_size=args.window_size, num_joints=133, num_classes=args.num_classes,
                 layout="rtmw_133", max_persons=args.max_persons,
                 feature_mode=args.feature_mode, max_samples=args.max_samples,
+                temporal_compression=args.temporal_compression,
                 augment=split == "train", augmentation_config={
                     "random_temporal_crop": True,
                     **temporal_augmentation_config,
