@@ -295,3 +295,17 @@ python train_best_action_hand_body.py --device cuda
 ```
 
 输出写入 `outputs/best_action_hand_body_ntu60_xsub`。旧实验全部保留，新入口拒绝加载旧权重；训练默认且强制启用 `torch.compile`，拒绝 `--no-compile`，并记录交互梯度、修正幅度及区域启用率。
+
+
+## 基于最佳模型去掉分类前池化
+
+新增 `body-local-hand-ctr-wide-relative-no-pool`：以当前最佳已训练 wide-relative 模型为基底，将分类前的节点、时间、人物平均以及左右手/面部平均融合替换为按顺序展开的可学习投影。身体、共享手部 CTR-GCN、面部 ST-GCN 和六通道手部特征沿用原结构；面部区域 token 预处理和骨干内部统计保留。默认 64 帧、2 人、60 类时参数量为 2,926,228，准确率待完整训练验证。详见 [分类前无池化方案](docs/best_no_pool.md)。
+
+```bash
+python train_best_no_pool.py --device cuda
+python train_best_no_pool.py --dry-run --device cuda --num-workers 0
+```
+
+该入口从头独立训练，输出保存到 `outputs/best_no_pool_ntu60_xsub/`。评估工具按 checkpoint 中记录的窗口与人物槽位配置重建模型。
+
+训练强制启用 `torch.compile`，拒绝 `--no-compile`；编译失败报错。新增读出参与编译，保留原最佳面部 `LocalSTBlock` 的编译边界。`--dry-run` 仅检查形状，不验证编译训练。

@@ -24,6 +24,7 @@ from isaa.models.body_local_fusion import (
 from isaa.models.body_local_full_gcn import FULL_GCN_VARIANT, BodyLocalFullGCNFusion
 from isaa.models.hand_body_proximity import PROXIMITY_VARIANT, HandBodyProximityFusion
 from isaa.models.best_hand_body_proximity import BEST_PROXIMITY_VARIANT, BestHandBodyProximityFusion
+from isaa.models.best_no_pool import NO_POOL_VARIANT, BestNoPoolFusion
 from isaa.models.best_action_hand_body import ACTION_PROXIMITY_VARIANT, BestActionHandBodyFusion
 from isaa.utils.seed import seed_everything
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
@@ -65,6 +66,7 @@ def main():
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     args = checkpoint["args"]
     classes = {
+        NO_POOL_VARIANT: BestNoPoolFusion,
         ACTION_PROXIMITY_VARIANT: BestActionHandBodyFusion,
         BEST_PROXIMITY_VARIANT: BestHandBodyProximityFusion,
         PROXIMITY_VARIANT: HandBodyProximityFusion,
@@ -87,6 +89,10 @@ def main():
         torch.backends.cudnn.allow_tf32 = args.get("tf32", True)
         torch.backends.cuda.matmul.allow_tf32 = args.get("tf32", True)
     model = (model_class(num_classes=args["num_classes"],
+                         window_size=checkpoint["model_config"]["readout_config"]["window_size"],
+                         max_persons=checkpoint["model_config"]["readout_config"]["max_persons"])
+             if model_class is BestNoPoolFusion else
+             model_class(num_classes=args["num_classes"],
                          hand_threshold=args.get("hand_route_threshold", 0.5),
                          confidence_threshold=args.get("body_confidence_threshold", 0.8),
                          body_temperature=args.get("body_probability_temperature", 1.0))
