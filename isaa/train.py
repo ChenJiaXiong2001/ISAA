@@ -297,6 +297,8 @@ def parse_args() -> argparse.Namespace:
     if args.init_checkpoint and args.model_variant not in {FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, CLASS_HAND_VARIANT}:
         parser.error("--init-checkpoint requires a full-GCN, hand/body proximity or class-hand routed model")
     if args.model_variant == ACTION_PROXIMITY_VARIANT:
+        if not args.compile or "--no-compile" in sys.argv[1:]:
+            parser.error("best-action-hand-body requires torch.compile; --no-compile is not allowed")
         if args.init_checkpoint:
             parser.error("best-action-hand-body trains from scratch; --init-checkpoint is not allowed")
         try:
@@ -877,6 +879,8 @@ def _run(args, save_dir, records) -> None:
     compile_enabled = bool(args.compile)
     allow_unspec_int = False
     if args.compile:
+        if args.model_variant == ACTION_PROXIMITY_VARIANT:
+            torch._dynamo.config.suppress_errors = False
         # CTR-GCN blocks keep their temporal stride as an integer module
         # attribute.  Without this option TorchDynamo specializes the same
         # forward graph repeatedly for stride variants until recompile_limit
@@ -886,12 +890,19 @@ def _run(args, save_dir, records) -> None:
             dynamo_config.allow_unspec_int_on_nn_module = True
             allow_unspec_int = True
         print(f"compile: torch.compile mode={args.compile_mode} (first batch will compile)", flush=True)
+        if args.model_variant == ACTION_PROXIMITY_VARIANT:
+            print("compile: required; original backbone and interaction neural computation compiled; "
+                  "dynamic neighbor construction remains eager; no whole-model eager fallback", flush=True)
         train_model = torch.compile(model, mode=args.compile_mode)
     else:
         print("compile: disabled (--no-compile); running eager model", flush=True)
         train_model = model
     records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode,
-                                   "allow_unspec_int_on_nn_module": allow_unspec_int})
+                                   "allow_unspec_int_on_nn_module": allow_unspec_int,
+                                   **({"required": True, "suppress_errors": False,
+                                       "scope": "original backbone and interaction neural computation",
+                                       "eager_control": "dynamic neighbor construction"}
+                                      if args.model_variant == ACTION_PROXIMITY_VARIANT else {})})
 
     archive = Path(args.archive)
     if not archive.is_absolute():

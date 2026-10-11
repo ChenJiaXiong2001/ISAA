@@ -294,4 +294,4 @@ python train_best_hand_body_proximity.py --dry-run --device cpu --window-size 9 
 python train_best_action_hand_body.py --device cuda
 ```
 
-输出写入 `outputs/best_action_hand_body_ntu60_xsub`。旧实验全部保留，新入口拒绝加载旧权重；默认 eager，并记录交互梯度、修正幅度及区域启用率。
+输出写入 `outputs/best_action_hand_body_ntu60_xsub`。旧实验全部保留，新入口拒绝加载旧权重；训练默认且强制启用 `torch.compile`，拒绝 `--no-compile`，并记录交互梯度、修正幅度及区域启用率。

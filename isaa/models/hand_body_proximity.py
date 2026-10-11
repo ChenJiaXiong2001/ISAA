@@ -55,8 +55,10 @@ class TorsoCoordinates(nn.Module):
         center = center.gather(1, nearest[..., None].expand(-1, -1, 2))
         valid &= reference_valid.any(1)[:, None, None]
         q = ((x[..., :2] - center[:, :, None]) / scale[:, None, None, None]).masked_fill(~valid[..., None], 0)
-        motion_valid = torch.zeros_like(valid)
-        motion_valid[:, 1:] = valid[:, 1:] & valid[:, :-1]
+        # Concatenation avoids Inductor CPU's mixed VecMask types when
+        # lowering a boolean slice assignment; the first frame stays invalid.
+        motion_valid = torch.cat((torch.zeros_like(valid[:, :1]),
+                                  valid[:, 1:] & valid[:, :-1]), dim=1)
         velocity = torch.zeros_like(q)
         velocity[:, 1:] = (q[:, 1:] - q[:, :-1]).masked_fill(~motion_valid[:, 1:, :, None], 0)
         center_motion = torch.zeros_like(center)

@@ -115,7 +115,6 @@ class ConditionalHandBodyInteraction(nn.Module):
             rows.append(torch.stack((people[pi], ti, hi, nodes[ji]), 1))
         return torch.cat(rows, 0) if rows else torch.empty((0, 4), dtype=torch.long, device=q.device)
 
-    @torch.compiler.disable
     def forward(self, geometry, enabled, return_details=False):
         q, valid = geometry["relative"], geometry["valid"]
         n, t = q.shape[:2]
@@ -210,12 +209,10 @@ class BestActionHandBodyFusion(BodyLocalHandCTRWideRelativeFusion):
             gates = mass * enabled
         return mass, gates, enabled
 
-    @torch.compiler.disable
     def _addition(self, x, frame_mask, baseline_logits):
         b, m = x.shape[0], x.shape[-1] if x.ndim == 5 else 1
         mass, candidate_gate, enabled = self.route_candidates(baseline_logits)
-        if self.interaction_strength.item() == 0:
-            enabled = torch.zeros_like(enabled)
+        enabled = enabled & (self.interaction_strength > 0)
         geometry = self.coordinates(x[:, :3], frame_mask)
         person_enabled = enabled[:, None].expand(-1, m, -1).reshape(b * m, 8)
         pooled, details = self.interaction(geometry, person_enabled)

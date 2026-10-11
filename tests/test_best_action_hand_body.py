@@ -181,7 +181,7 @@ class ActionInteractionTests(unittest.TestCase):
             args = parse_args()
         self.assertEqual(args.model_variant, ACTION_PROXIMITY_VARIANT)
         self.assertIsNone(args.init_checkpoint)
-        self.assertFalse(args.compile)
+        self.assertTrue(args.compile)
         self.assertEqual(args.node_count, 133)
         self.assertEqual(args.interaction_config["region_actions"]["left_foot"], [16, 17])
         for flag in ("--init-checkpoint", "--init-checkpoint=old.pt"):
@@ -195,6 +195,20 @@ class ActionInteractionTests(unittest.TestCase):
                        {"region_actions": {"left_foot": [61]}}, {"auxiliary_loss_weight": 0}):
             with self.assertRaises(ValueError):
                 validated_config(config, 60)
+
+    def test_compile_is_required_in_preset_and_generic_entry(self):
+        for overrides in ([], ["--compile"], ["--compile-mode", "default"]):
+            with patch.object(sys, "argv", ["main.py", *training_arguments(overrides)]):
+                self.assertTrue(parse_args().compile)
+        for overrides in (["--no-compile"], ["--compile", "--no-compile"],
+                          ["--no-compile", "--compile"]):
+            with self.assertRaisesRegex(ValueError, "requires torch.compile"):
+                training_arguments(overrides)
+        for overrides in (["--no-compile"], ["--compile", "--no-compile"],
+                          ["--no-compile", "--compile"]):
+            with patch.object(sys, "argv", ["main.py", "--model-variant", ACTION_PROXIMITY_VARIANT,
+                                            *overrides]), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                parse_args()
 
     def test_save_load_preserves_schedule_and_predictions(self):
         model = self.model().eval()
@@ -221,7 +235,38 @@ class ActionInteractionTests(unittest.TestCase):
             x = proximity_tests.ProximityTests.sample()
             torch.testing.assert_close(model(x), compiled(x))
 
+    def test_active_interaction_neural_layers_are_captured_and_backward_is_finite(self):
+        graphs = []
+
+        def capture_backend(graph, inputs):
+            graphs.append(str(graph.graph))
+            return graph.forward
+
+        model = self.model().train()
+        model.set_training_epoch(6)
+        try:
+            compiled = torch.compile(model, backend=capture_backend)
+        except RuntimeError as exc:
+            if "Windows not yet supported" in str(exc):
+                self.skipTest("Installed PyTorch 2.1 does not support torch.compile on Windows")
+            raise
+        logits, details = compiled(proximity_tests.ProximityTests.sample(), return_interaction=True)
+        loss, _ = model.classification_loss(logits, details, torch.tensor([15, 16]))
+        loss.backward()
+        self.assertGreater(details["edges"].shape[0], 0)
+        self.assertTrue(torch.isfinite(loss))
+        self.assertGreater(model.interaction.node_encoder[0].weight.grad.abs().sum(), 0)
+        captured = "\n".join(graphs).lower()
+        for name in ("node_encoder", "edge_encoder", "torso_encoder", "temporal", "interaction_head"):
+            self.assertIn(name, captured)
+
     def test_scratch_training_stages_checkpoint_evaluation_and_ablation(self):
+        try:
+            torch.compile(torch.nn.Identity())
+        except RuntimeError as exc:
+            if "Windows not yet supported" in str(exc):
+                self.skipTest("Compiled training requires a supported runtime; no eager fallback")
+            raise
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -240,8 +285,8 @@ class ActionInteractionTests(unittest.TestCase):
                        "--epochs", "3", "--window-size", "5", "--batch-size", "3", "--test-batch-size", "3",
                        "--max-persons", "1", "--num-workers", "0", "--device", "cpu", "--no-drop-last",
                        "--interaction-config", str(config), "--save-dir", str(directory / "runs")]
-            result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=120)
-            self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr[-3000:])
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=600)
+            self.assertEqual(result.returncode, 0, result.stdout[-3000:] + result.stderr)
             run = next((directory / "runs").iterdir())
             with (run / "epochs.csv").open(newline="") as stream:
                 rows = list(csv.DictReader(stream))
@@ -252,6 +297,9 @@ class ActionInteractionTests(unittest.TestCase):
             checkpoint = torch.load(run / "last.pt", map_location="cpu", weights_only=False)
             self.assertEqual(checkpoint["architecture"], BestActionHandBodyFusion.ARCHITECTURE)
             self.assertIsNone(checkpoint["args"]["init_checkpoint"])
+            self.assertTrue(checkpoint["args"]["compile"])
+            saved_config = json.loads((run / "config.json").read_text(encoding="utf-8"))
+            self.assertTrue(saved_config["compile"]["enabled"])
             self.assertEqual(checkpoint["model_config"]["hand_input_channels"], 6)
             self.assertEqual(checkpoint["model"]["interaction_strength"].item(), 1)
             for mode in ("adaptive", "none"):
