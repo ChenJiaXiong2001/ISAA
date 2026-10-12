@@ -124,6 +124,11 @@ _IMPLEMENTED_ABLATION_STAGES = {
 }
 
 
+def _is_best_weighted_run(args: argparse.Namespace) -> bool:
+    return (args.model_variant == "body-local-hand-ctr-wide-relative"
+            and args.temporal_compression == "confidence_weighted")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", default="data/ntu60_skeletons_rtmw.zip")
@@ -313,6 +318,11 @@ def parse_args() -> argparse.Namespace:
             parser.error("best-no-pool requires torch.compile; --no-compile is not allowed")
         if args.feature_mode != "raw":
             parser.error("best-no-pool requires raw x/y/score or the original eight-channel cache")
+    if _is_best_weighted_run(args):
+        if not args.compile or "--no-compile" in sys.argv[1:]:
+            parser.error("best-weighted-100 requires torch.compile; --no-compile is not allowed")
+        if args.feature_mode != "raw" or args.npy_dir:
+            parser.error("best weighted compression requires full RTMW ZIP sequences with raw x/y/score")
     if args.max_grad_norm is None:
         args.max_grad_norm = 5.0 if args.model_variant == NO_POOL_VARIANT else 0.0
     if args.compile_mode is None:
@@ -868,7 +878,7 @@ def _run(args, save_dir, records) -> None:
                                              "random_temporal_crop": temporal_augmented,
                                              **temporal_augmentation_config,
                                          } if (temporal_augmented or coordinate_augmented) else {
-                                             "random_temporal_crop": not bool(args.npy_dir),
+                                             "random_temporal_crop": not bool(args.npy_dir) and args.temporal_compression == "none",
                                          })})
     if args.model_variant == ACTION_PROXIMITY_VARIANT:
         records.update_config(initialization="random_from_scratch", interaction_training={
@@ -877,6 +887,8 @@ def _run(args, save_dir, records) -> None:
             "inference": "hard candidate threshold + distance hysteresis",
             "training": "soft candidate gates; exploration floor decays during ramp",
         })
+    if _is_best_weighted_run(args):
+        records.update_config(initialization="random_from_scratch")
     if args.model_variant == "original":
         print(f"Original CTR-GCN RTMW{args.node_count} points={args.max_persons} device={device} "
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
@@ -965,7 +977,7 @@ def _run(args, save_dir, records) -> None:
     compile_enabled = bool(args.compile)
     allow_unspec_int = False
     if args.compile:
-        if args.model_variant in {ACTION_PROXIMITY_VARIANT, NO_POOL_VARIANT}:
+        if args.model_variant in {ACTION_PROXIMITY_VARIANT, NO_POOL_VARIANT} or _is_best_weighted_run(args):
             torch._dynamo.config.suppress_errors = False
         # CTR-GCN blocks keep their temporal stride as an integer module
         # attribute.  Without this option TorchDynamo specializes the same
@@ -982,6 +994,9 @@ def _run(args, save_dir, records) -> None:
         if args.model_variant == NO_POOL_VARIANT:
             print("compile: required; body/hand encoders and ordered readouts compiled; "
                   "original face LocalSTBlock boundary retained; no whole-model eager fallback", flush=True)
+        if _is_best_weighted_run(args):
+            print("compile: required; original body/hand encoders, pooling, fusion and classifier compiled; "
+                  "original face LocalSTBlock boundary retained; no whole-model eager fallback", flush=True)
         train_model = torch.compile(model, mode=args.compile_mode)
     else:
         print("compile: disabled (--no-compile); running eager model", flush=True)
@@ -995,7 +1010,11 @@ def _run(args, save_dir, records) -> None:
                                       {"required": True, "suppress_errors": False,
                                        "scope": "body/hand encoders and ordered node/time/person readouts",
                                        "eager_control": "original face LocalSTBlock boundary"}
-                                      if args.model_variant == NO_POOL_VARIANT else {})})
+                                      if args.model_variant == NO_POOL_VARIANT else
+                                      {"required": True, "suppress_errors": False,
+                                       "scope": "original body/hand encoders, pooling, fusion and classifier",
+                                       "eager_control": "original face LocalSTBlock boundary"}
+                                      if _is_best_weighted_run(args) else {})})
 
     archive = Path(args.archive)
     if not archive.is_absolute():
@@ -1067,7 +1086,7 @@ def _run(args, save_dir, records) -> None:
                 feature_mode=args.feature_mode, max_samples=args.max_samples,
                 temporal_compression=args.temporal_compression,
                 augment=split == "train", augmentation_config={
-                    "random_temporal_crop": True,
+                    "random_temporal_crop": args.temporal_compression == "none",
                     **temporal_augmentation_config,
                 },
             )
