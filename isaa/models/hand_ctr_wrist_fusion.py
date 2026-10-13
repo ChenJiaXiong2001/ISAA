@@ -37,7 +37,11 @@ class HandCTRWristFusion(nn.Module):
     HEAD_OUTPUT_CHANNELS = 48
     INJECTION_BLOCK = 4
     LOCAL_COORDINATE_MODE = "torso_relative"
-    COMPILE_MICROBATCH = 2
+    # Keep the optimizer/data-loader batch independent from the CUDA compiler
+    # shape.  RTX 5090 + Triton 3.4 currently fails lowering some mask-heavy
+    # CTR-GCN graphs at flattened person-batch=2; one sample per compiled call
+    # is the conservative fallback while the logical training batch remains 32.
+    COMPILE_MICROBATCH = 1
 
     def __init__(self, num_classes: int = 60):
         super().__init__()
