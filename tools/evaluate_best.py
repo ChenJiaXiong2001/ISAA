@@ -28,6 +28,7 @@ from isaa.models.best_no_pool import NO_POOL_VARIANT, BestNoPoolFusion
 from isaa.models.best_action_hand_body import ACTION_PROXIMITY_VARIANT, BestActionHandBodyFusion
 from isaa.utils.seed import seed_everything
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
+from isaa.models.hand_ctr_wrist_fusion import HAND_CTR_WRIST_VARIANT, HandCTRWristFusion
 
 NTU60_NAMES = [
     "喝水", "吃饭或吃零食", "刷牙", "梳头", "掉落物品", "捡起物品", "扔东西",
@@ -74,6 +75,7 @@ def main():
         "body-local-hand-ctr-wide-relative": BodyLocalHandCTRWideRelativeFusion,
         "body-local-hand-ctr-wide-relative-routed": BodyLocalHandCTRWideRelativeRoutedFusion,
         CLASS_HAND_VARIANT: BodyLocalClassHandRoutedFusion,
+        HAND_CTR_WRIST_VARIANT: HandCTRWristFusion,
     }
     model_class = classes[args["model_variant"]]
     routed = model_class is BodyLocalHandCTRWideRelativeRoutedFusion
@@ -88,7 +90,9 @@ def main():
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.allow_tf32 = args.get("tf32", True)
         torch.backends.cuda.matmul.allow_tf32 = args.get("tf32", True)
-    model = (model_class(num_classes=args["num_classes"],
+    model = (model_class(num_classes=args["num_classes"])
+             if model_class is HandCTRWristFusion else
+             model_class(num_classes=args["num_classes"],
                          window_size=checkpoint["model_config"]["readout_config"]["window_size"],
                          max_persons=checkpoint["model_config"]["readout_config"]["max_persons"])
              if model_class is BestNoPoolFusion else

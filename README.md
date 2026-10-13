@@ -309,3 +309,15 @@ python train_best_no_pool.py --dry-run --device cuda --num-workers 0
 该入口默认从头独立训练，输出保存到 `outputs/best_no_pool_ntu60_xsub/`。强制启用 torch.compile（此变体默认 mode=default），默认峰值学习率降为 0.025，并在 SGD 更新前检查梯度与进行 L2 裁剪（默认阈值 5）。可使用 `--resume-checkpoint <同模型轮末last.pt>` 恢复模型、SGD 动量及轮数；新记录写到新目录。评估工具按 checkpoint 中记录的窗口与人物槽位配置重建模型。
 
 训练强制启用 `torch.compile`，拒绝 `--no-compile`；编译失败报错。新增读出参与编译，保留原最佳面部 `LocalSTBlock` 的编译边界。`--dry-run` 仅检查形状，不验证编译训练。
+
+## 去面部细节的双手 CTR-GCN 手腕注入
+
+新增 `hand-ctr-wrist-fusion`：主干使用 19 个身体节点，双手各 21 点通过共享 CTR-GCN 编码，按帧聚合后分别注入左右手腕；鼻子、双眼和双耳五个粗头部点保留为朝向信息并注入鼻点。面部细节点 23–90 不参与计算，原始输入仍保持 RTMW-133 形状以兼容数据集。训练入口固定 100 帧置信度压缩、100 轮、逐 optimizer update 的 warmup+余弦学习率（峰值 0.1、起始 0.001、最小 0.0001），从随机初始化开始。
+
+```bash
+python train_hand_ctr_wrist_fusion.py --device cuda
+python train_hand_ctr_wrist_fusion.py --dry-run --device cpu
+python tools/check_hand_ctr_wrist_compile.py --device cuda
+```
+
+该入口和通用 `isaa.train` 入口都强制启用 `torch.compile`，拒绝 `--no-compile`、旧 checkpoint、resume、协议覆盖和梯度累积；编译失败直接报错。配置见 [手腕注入方案](docs/hand_ctr_wrist_injection_plan_20261014_v2_cosine100.md) 和 [模型配置](configs/hand_ctr_wrist_fusion.json)。

@@ -84,6 +84,7 @@ from isaa.models.best_hand_body_proximity import BEST_PROXIMITY_VARIANT, BestHan
 from isaa.models.best_no_pool import NO_POOL_VARIANT, BestNoPoolFusion
 from isaa.models.best_action_hand_body import ACTION_PROXIMITY_VARIANT, BestActionHandBodyFusion
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
+from isaa.models.hand_ctr_wrist_fusion import HAND_CTR_WRIST_VARIANT, HandCTRWristFusion
 from isaa.models.body_local_fusion import (
     BodyLocalFusion, BodyLocalDropoutFusion, BodyLocalFullFusion, BodyLocalRelativeFusion,
     BodyLocalHandCTRRelativeFusion, BodyLocalHandCTRWideRelativeFusion,
@@ -108,6 +109,7 @@ from isaa.utils.console_logging import (
     mirror_console_to_file,
 )
 from isaa.utils.experiment import RunRecords, create_run_directory, ctrgcn_learning_rate
+from isaa.utils.batch_cosine import BatchWarmupCosine
 from isaa.utils.seed import seed_everything
 from isaa.layouts import register_skeleton_presets
 from isaa.layouts.rtmw_133 import RTMW_32_NODE_INDICES
@@ -142,7 +144,7 @@ def parse_args() -> argparse.Namespace:
                         help=("Run one implemented single-change baseline stage. "
                               "s00_original25 and s01_original32 differ only in node count; "
                               "later stages are intentionally unavailable until implemented."))
-    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
+    parser.add_argument("--model-variant", choices=("isaa", "original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"), default=None,
                         help="Default: full GCN upgrade of the best wide-relative model")
     parser.add_argument("--feature-mode", choices=("isaa", "raw"), default=None,
                         help="Input features: ISAA relative xy/score or raw x/y/score")
@@ -190,7 +192,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nesterov", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--weight-decay", type=float, default=0.0004)
     parser.add_argument("--warmup-epochs", type=int, default=5)
-    parser.add_argument("--lr-steps", type=int, nargs="+", default=[35, 55],
+    parser.add_argument("--lr-scheduler", choices=("step", "warmup_cosine"), default="step")
+    parser.add_argument("--warmup-start-lr", type=float, default=0.001)
+    parser.add_argument("--min-lr", type=float, default=0.0001)
+    parser.add_argument("--lr-steps", type=int, nargs="+", default=None,
                         help="Zero-based decay epochs, matching the official CTR-GCN code")
     parser.add_argument("--lr-decay", type=float, default=0.1)
     parser.add_argument("--drop-last", action=argparse.BooleanOptionalAction, default=True,
@@ -264,7 +269,7 @@ def parse_args() -> argparse.Namespace:
         args.num_classes = 60 if args.split in {"xsub60", "xset60"} else 120
     if args.node_count is None:
         args.node_count = args.num_main_nodes
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", CLASS_HAND_VARIANT, "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
         args.main_only = False
         args.node_count = 133
         args.feature_mode = "raw" if args.feature_mode is None else args.feature_mode
@@ -318,6 +323,24 @@ def parse_args() -> argparse.Namespace:
             parser.error("best-no-pool requires torch.compile; --no-compile is not allowed")
         if args.feature_mode != "raw":
             parser.error("best-no-pool requires raw x/y/score or the original eight-channel cache")
+    if args.model_variant == HAND_CTR_WRIST_VARIANT:
+        if not args.compile or "--no-compile" in sys.argv[1:]:
+            parser.error("hand-ctr-wrist-fusion requires torch.compile; --no-compile is not allowed")
+        if args.feature_mode != "raw" or args.npy_dir:
+            parser.error("hand-ctr-wrist-fusion requires raw RTMW ZIP sequences")
+        if args.init_checkpoint or args.resume_checkpoint:
+            parser.error("hand-ctr-wrist-fusion trains from random initialization; checkpoint loading is not allowed")
+        if args.window_size != 100 or args.temporal_compression != "confidence_weighted":
+            parser.error("hand-ctr-wrist-fusion fixes window-size=100 and temporal-compression=confidence_weighted")
+        if args.epochs != 100 or args.lr_scheduler != "warmup_cosine":
+            parser.error("hand-ctr-wrist-fusion fixes 100 epochs with per-update warmup cosine learning rate")
+        if (args.lr != 0.1 or args.warmup_epochs != 5
+                or args.warmup_start_lr != 0.001 or args.min_lr != 0.0001):
+            parser.error("hand-ctr-wrist-fusion fixes lr=0.1, five warmup epochs, start-lr=0.001 and min-lr=0.0001")
+        if args.compile_mode not in (None, "reduce-overhead"):
+            parser.error("hand-ctr-wrist-fusion fixes compile-mode=reduce-overhead")
+        if args.grad_accum_steps != 1:
+            parser.error("hand-ctr-wrist-fusion requires grad-accum-steps=1")
     if _is_best_weighted_run(args):
         if not args.compile or "--no-compile" in sys.argv[1:]:
             parser.error("best-weighted-100 requires torch.compile; --no-compile is not allowed")
@@ -356,6 +379,24 @@ def parse_args() -> argparse.Namespace:
         parser.error("momentum must be in [0,1); Nesterov requires positive momentum")
     if not 0 <= args.weight_decay < float("inf") or not 0 < args.lr_decay <= 1:
         parser.error("weight-decay must be finite and nonnegative; lr-decay must be in (0,1]")
+    if args.lr_scheduler == "warmup_cosine":
+        if not args.compile or "--no-compile" in sys.argv[1:]:
+            parser.error("batch cosine training requires torch.compile; --no-compile is not allowed")
+        if args.grad_accum_steps != 1:
+            parser.error("batch cosine requires grad-accum-steps=1: one optimizer update per training batch")
+        if args.resume_checkpoint:
+            parser.error("batch cosine currently requires a new run; resume-checkpoint is not supported")
+        if args.lr_steps is not None or "--lr-decay" in {arg.split('=', 1)[0] for arg in sys.argv[1:]}:
+            parser.error("batch cosine replaces lr-steps/lr-decay")
+        try:
+            BatchWarmupCosine(epochs=args.epochs, batches_per_epoch=2,
+                             warmup_epochs=args.warmup_epochs, base_lr=args.lr,
+                             warmup_start_lr=args.warmup_start_lr, min_lr=args.min_lr)
+        except ValueError as exc:
+            parser.error(str(exc))
+        args.lr_steps = []
+    elif args.lr_steps is None:
+        args.lr_steps = [35, 55]
     if args.warmup_epochs < 0 or any(step < 0 for step in args.lr_steps):
         parser.error("warmup-epochs and lr-steps must be nonnegative")
     if args.lr_steps != sorted(set(args.lr_steps)):
@@ -407,7 +448,7 @@ def collate_preprocessed(samples, *, main_indices=None):
 
 def run_epoch(
     model, loader, device, optimizer=None, *, progress_context=None, log_interval=0.5,
-    records=None, epoch=0, learning_rate=0.0,
+    records=None, epoch=0, learning_rate=0.0, lr_scheduler=None,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -434,6 +475,10 @@ def run_epoch(
     gradient_values = (torch.empty(total_steps, device=device) if records is not None and training and max_grad_norm > 0 else None)
     recorded_batches = 0
     phase = "train" if training else "val"
+    batch_lrs = []
+    first_optimizer_update = lr_scheduler.completed_updates if lr_scheduler is not None else 0
+    if training and lr_scheduler is not None and grad_accum_steps != 1:
+        raise ValueError("Batch cosine requires one optimizer update per training batch")
 
     def save_failure(reason, step, x, labels, frame_mask):
         if records is not None:
@@ -461,6 +506,10 @@ def run_epoch(
                 x = x.to(device, non_blocking=non_blocking)
                 labels = labels.to(device, non_blocking=non_blocking)
                 frame_mask = frame_mask.to(device, non_blocking=non_blocking)
+                if training and lr_scheduler is not None:
+                    learning_rate = lr_scheduler.lr_at(lr_scheduler.completed_updates)
+                    for group in optimizer.param_groups:
+                        group["lr"] = learning_rate
                 if training and (step - 1) % grad_accum_steps == 0:
                     optimizer.zero_grad(set_to_none=True)
                 if action_interaction:
@@ -490,6 +539,8 @@ def run_epoch(
                                 save_failure("nonfinite_gradient_norm", step, x, labels, frame_mask)
                                 raise
                         optimizer.step()
+                        if lr_scheduler is not None:
+                            lr_scheduler.completed_updates += 1
                 count = labels.size(0)
                 # Keep metrics on device until epoch end. Preserve the fail-fast loss check above.
                 with torch.no_grad():
@@ -513,6 +564,7 @@ def run_epoch(
                         metric_names = list(values)
                         interaction_rows.append(torch.stack([v.detach().clone() for v in values.values()]) * count)
                 total += count
+                batch_lrs.append(learning_rate)
                 if records is not None:
                     record_values[step - 1].copy_(torch.stack(
                         (loss.detach(), correct.float(), correct_top5.float())))
@@ -554,17 +606,22 @@ def run_epoch(
                     "epoch": epoch, "phase": phase, "step": index + 1,
                     "global_step": (epoch - 1) * total_steps + index + 1,
                     "samples": count, "loss": batch_loss, "top1": batch_correct / count,
-                    "top5": batch_top5 / count, "lr": learning_rate,
+                    "top5": batch_top5 / count, "lr": batch_lrs[index],
                     "data_wait_seconds": record_wait[index],
                     "host_batch_seconds": record_host_seconds[index],
                 }
+                if training and lr_scheduler is not None:
+                    row["optimizer_update"] = first_optimizer_update + index
                 if norms is not None and ((index + 1) % grad_accum_steps == 0 or index + 1 == total_steps):
                     row.update(gradient_norm=norms[index], max_grad_norm=max_grad_norm)
                 records.batch(row)
         finish_progress_lines()
     extra_metrics = {}
+    if training and lr_scheduler is not None:
+        extra_metrics.update(lr_first=batch_lrs[0], lr_last=batch_lrs[-1],
+                             lr_mean=sum(batch_lrs) / len(batch_lrs))
     if interaction_rows:
-        extra_metrics = dict(zip(metric_names, (torch.stack(interaction_rows).sum(0) / total).cpu().tolist()))
+        extra_metrics.update(zip(metric_names, (torch.stack(interaction_rows).sum(0) / total).cpu().tolist()))
     return {
         "loss": loss_sum / total, "top1": correct / total, "top5": correct_top5 / total,
         "samples_per_second": total / max(now - stage_started_at, 1e-9),
@@ -685,7 +742,28 @@ def _run(args, save_dir, records) -> None:
             args.backbone_config = initial_checkpoint["model_config"]["backbone_config"]
         if args.model_variant == PROXIMITY_VARIANT and args.interaction_config is None:
             args.interaction_config = initial_checkpoint["model_config"]["interaction_config"]
-    if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
+    if args.model_variant == HAND_CTR_WRIST_VARIANT:
+        model = HandCTRWristFusion(num_classes=args.num_classes).to(device)
+        model_config = {
+            "variant": HAND_CTR_WRIST_VARIANT,
+            "num_classes": args.num_classes,
+            "body_indices": list(model.BODY_INDICES),
+            "hand_indices": list(model.HAND_INDICES),
+            "head_indices": list(model.HEAD_INDICES),
+            "face_nodes_used": [],
+            "body_channels": list(model.BODY_CHANNELS),
+            "hand_channels": list(model.HAND_CHANNELS),
+            "hand_input_channels": model.HAND_INPUT_CHANNELS,
+            "head_output_channels": model.HEAD_OUTPUT_CHANNELS,
+            "injection_block": model.INJECTION_BLOCK,
+            "injection_nodes": {"left_hand": 5, "right_hand": 6, "head": 0},
+            "body_graph": "19-point induced RTMW graph plus nose-to-shoulder links",
+            "hand_graph": "shared 21-point RTMW hand graph",
+            "fusion": "per-frame masked hand mean + quality-weighted residual into matching wrists; five-point head MLP into nose",
+            "quality": "mean valid hand score; torso-geometry reliability gates injection",
+            "readout": "masked body-node mean, then fixed time/person mean",
+        }
+    elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
         model_class = (BestNoPoolFusion if args.model_variant == NO_POOL_VARIANT
                        else BestActionHandBodyFusion if args.model_variant == ACTION_PROXIMITY_VARIANT
                        else BestHandBodyProximityFusion if args.model_variant == BEST_PROXIMITY_VARIANT
@@ -833,8 +911,12 @@ def _run(args, save_dir, records) -> None:
         "config": ("config/rtmw133/default.yaml" if args.model_variant == "original" else
                    ("config/nturgbd120-cross-set/default.yaml" if args.split == "xset120"
                     else "config/nturgbd120-cross-subject/default.yaml")),
-        "schedule": "main.py:adjust_learning_rate (zero-based milestones)",
-        "adaptation": ("Best wide-relative encoders; ordered learned node/time/person readouts; no classification pooling"
+        "schedule": ("isaa/utils/batch_cosine.py: batch warmup + single-cycle cosine"
+                     if args.lr_scheduler == "warmup_cosine" else
+                     "main.py:adjust_learning_rate (zero-based milestones)"),
+        "adaptation": ("19-point body CTR-GCN; shared 21-point hand CTR-GCN; five-point coarse-head MLP; per-frame residual injection at matching wrists"
+                       if args.model_variant == HAND_CTR_WRIST_VARIANT else
+                       "Best wide-relative encoders; ordered learned node/time/person readouts; no classification pooling"
                        if args.model_variant == NO_POOL_VARIANT else "Original best unchanged; scratch training; candidate/proximity routed residual and independent baseline/interaction supervision"
                        if args.model_variant == ACTION_PROXIMITY_VARIANT else
                        "Unchanged original best features/backbones/fusion plus sparse hand/body feature residual"
@@ -843,7 +925,7 @@ def _run(args, save_dir, records) -> None:
                        if args.model_variant == PROXIMITY_VARIANT else
                        "Full official body/hand CTR-GCN and face ST-GCN; best wide-relative features and fusion"
                        if args.model_variant == FULL_GCN_VARIANT else "BodyLocalFusion: body22 CTR-GCN + hand42/face6 ST-GCN, raw x/y/score, masked pooling and pre-classifier fusion"
-                       if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
+                       if args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else
                        (f"official RTMW induced {args.node_count}-node graph, raw x/y/score, ordinary BN, no masks"
                         if args.model_variant == "original" else
                         "RTMW relative xy/score, masks, 32 joints; existing crop/pad preprocessing")),
@@ -862,7 +944,7 @@ def _run(args, save_dir, records) -> None:
                                    "cudnn": cudnn_version,
                                    "cudnn_enabled": torch.backends.cudnn.enabled},
                           reference=reference,
-                          preprocessing={"channels": (["raw_x", "raw_y", "score"] if args.model_variant in {PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT} else
+                          preprocessing={"channels": (["raw_x", "raw_y", "score"] if args.model_variant in {HAND_CTR_WRIST_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT} else
                                                       ["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y"]
                                                       if args.model_variant == "body-local-relative-split" else
                                                       (["raw_x", "raw_y", "score", "torso_relative_x", "torso_relative_y", "cross_hand_distance", "cross_hand_direction_x", "cross_hand_direction_y"]
@@ -889,6 +971,8 @@ def _run(args, save_dir, records) -> None:
         })
     if _is_best_weighted_run(args):
         records.update_config(initialization="random_from_scratch")
+    if args.model_variant == HAND_CTR_WRIST_VARIANT:
+        records.update_config(initialization="random_from_scratch")
     if args.model_variant == "original":
         print(f"Original CTR-GCN RTMW{args.node_count} points={args.max_persons} device={device} "
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
@@ -896,6 +980,9 @@ def _run(args, save_dir, records) -> None:
             stage_label = _IMPLEMENTED_ABLATION_STAGES.get(args.ablation_stage or "", {}).get("label")
             print(f"ablation_stage: {args.ablation_stage}"
                   + (f" ({stage_label})" if stage_label else ""), flush=True)
+    elif args.model_variant == HAND_CTR_WRIST_VARIANT:
+        print(f"HandCTRWristFusion RTMW body19+hand42+head5 device={device} "
+              f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug"}:
         label = ("BestNoPoolFusion" if args.model_variant == NO_POOL_VARIANT
                  else "BestActionHandBodyFusion" if args.model_variant == ACTION_PROXIMITY_VARIANT
@@ -931,7 +1018,8 @@ def _run(args, save_dir, records) -> None:
               f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     print(f"optimizer: SGD lr={args.lr} momentum={args.momentum} nesterov={args.nesterov} "
           f"weight_decay={args.weight_decay} warmup={args.warmup_epochs} "
-          f"steps_zero_based={args.lr_steps} decay={args.lr_decay} epochs={args.epochs}", flush=True)
+          f"scheduler={args.lr_scheduler} steps_zero_based={args.lr_steps} "
+          f"epochs={args.epochs}", flush=True)
     if args.max_grad_norm:
         print(f"optimizer: global gradient L2 clipping max_norm={args.max_grad_norm}; nonfinite gradients fail before SGD", flush=True)
     print(f"records: {save_dir}", flush=True)
@@ -944,8 +1032,8 @@ def _run(args, save_dir, records) -> None:
           f"pin_memory={device.type == 'cuda'} persistent_workers={args.num_workers > 0} "
           f"prefetch_factor={args.prefetch_factor if args.num_workers > 0 else None}", flush=True)
     if args.dry_run:
-        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
-        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
+        people = args.max_persons if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else 2
+        synthetic_nodes = (133 if args.ablation_stage == "s03_original32_aux" else args.node_count) if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"} else (
             args.node_count if args.main_only else 133
         )
         synthetic_channels = (8 if args.model_variant in {"body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, "body-local-hand-ctr-wide-relative-routed"}
@@ -960,7 +1048,7 @@ def _run(args, save_dir, records) -> None:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
-            elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+            elif args.model_variant in {"body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
                 logits = model(x)
                 print(f"input={tuple(x.shape)} logits={tuple(logits.shape)} "
                       f"finite={torch.isfinite(logits).all().item()}")
@@ -977,7 +1065,8 @@ def _run(args, save_dir, records) -> None:
     compile_enabled = bool(args.compile)
     allow_unspec_int = False
     if args.compile:
-        if args.model_variant in {ACTION_PROXIMITY_VARIANT, NO_POOL_VARIANT} or _is_best_weighted_run(args):
+        if (args.model_variant in {ACTION_PROXIMITY_VARIANT, NO_POOL_VARIANT}
+                or _is_best_weighted_run(args) or args.lr_scheduler == "warmup_cosine"):
             torch._dynamo.config.suppress_errors = False
         # CTR-GCN blocks keep their temporal stride as an integer module
         # attribute.  Without this option TorchDynamo specializes the same
@@ -997,6 +1086,9 @@ def _run(args, save_dir, records) -> None:
         if _is_best_weighted_run(args):
             print("compile: required; original body/hand encoders, pooling, fusion and classifier compiled; "
                   "original face LocalSTBlock boundary retained; no whole-model eager fallback", flush=True)
+        if args.model_variant == HAND_CTR_WRIST_VARIANT:
+            print("compile: required; body19/hand21/head5 encoders, masked pooling, wrist fusion and classifier compiled; "
+                  "no face branch and no whole-model eager fallback", flush=True)
         train_model = torch.compile(model, mode=args.compile_mode)
     else:
         print("compile: disabled (--no-compile); running eager model", flush=True)
@@ -1014,7 +1106,14 @@ def _run(args, save_dir, records) -> None:
                                       {"required": True, "suppress_errors": False,
                                        "scope": "original body/hand encoders, pooling, fusion and classifier",
                                        "eager_control": "original face LocalSTBlock boundary"}
-                                      if _is_best_weighted_run(args) else {})})
+                                      if args.model_variant == HAND_CTR_WRIST_VARIANT else
+                                      {"required": True, "suppress_errors": False,
+                                       "scope": "body19/hand21/head5 encoders, pooling, wrist fusion and classifier",
+                                       "eager_control": "none"}
+                                      if _is_best_weighted_run(args) else
+                                      {"required": True, "suppress_errors": False,
+                                       "scope": "model neural computation; existing boundaries preserved"}
+                                      if args.lr_scheduler == "warmup_cosine" else {})})
 
     archive = Path(args.archive)
     if not archive.is_absolute():
@@ -1022,7 +1121,7 @@ def _run(args, save_dir, records) -> None:
     loaders = {}
     dataset_info = {}
     if args.npy_dir:
-        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             npy_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         elif args.main_only:
             npy_indices = model.main_joint_indices.cpu()
@@ -1030,7 +1129,7 @@ def _run(args, save_dir, records) -> None:
             npy_indices = None
         collate = partial(collate_preprocessed, main_indices=npy_indices)
     else:
-        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
+        if args.model_variant in {"original", "body-local", "body-local-dropout", "body-local-relative", "body-local-relative-split", "body-local-hand-ctr-relative", "body-local-hand-ctr-wide-relative", HAND_CTR_WRIST_VARIANT, NO_POOL_VARIANT, FULL_GCN_VARIANT, PROXIMITY_VARIANT, BEST_PROXIMITY_VARIANT, ACTION_PROXIMITY_VARIANT, "body-local-hand-ctr-wide-relative-routed", "body-local-time-aug", "body-local-coord-aug", "body-local-full", "torso-cross-attn", "torso-cross-attn-official"}:
             main_indices = None if args.ablation_stage == "s03_original32_aux" or args.node_count == 133 else torch.tensor(original_indices, dtype=torch.long)
         else:
             main_indices = model.main_joint_indices.cpu() if args.main_only else None
@@ -1135,6 +1234,14 @@ def _run(args, save_dir, records) -> None:
         print(f"resume: restored model and SGD momentum; next_epoch={start_epoch}; new records={save_dir}", flush=True)
     training_started_at = time.perf_counter()
     train_steps = len(loaders["train"])
+    lr_scheduler = None
+    if args.lr_scheduler == "warmup_cosine":
+        lr_scheduler = BatchWarmupCosine(
+            epochs=args.epochs, batches_per_epoch=train_steps,
+            warmup_epochs=args.warmup_epochs, base_lr=args.lr,
+            warmup_start_lr=args.warmup_start_lr, min_lr=args.min_lr)
+        records.update_config(lr_schedule=lr_scheduler.state_dict())
+        print(f"batch cosine: {lr_scheduler.state_dict()}", flush=True)
     steps_per_epoch = train_steps + len(loaders["val"])
     total_run_steps = steps_per_epoch * (args.epochs - start_epoch + 1)
     for epoch in range(start_epoch, args.epochs + 1):
@@ -1142,8 +1249,8 @@ def _run(args, save_dir, records) -> None:
             model.set_training_epoch(epoch)
         if args.model_variant == "isaa":
             model.set_fine_enabled(not args.main_only and epoch > args.fine_start_epoch)
-        learning_rate = ctrgcn_learning_rate(epoch - 1, args.lr, args.warmup_epochs,
-                                            args.lr_steps, args.lr_decay)
+        learning_rate = (lr_scheduler.lr_at(lr_scheduler.completed_updates) if lr_scheduler is not None else
+                         ctrgcn_learning_rate(epoch - 1, args.lr, args.warmup_epochs, args.lr_steps, args.lr_decay))
         for group in optimizer.param_groups:
             group["lr"] = learning_rate
         completed_before = (epoch - start_epoch) * steps_per_epoch
@@ -1157,6 +1264,8 @@ def _run(args, save_dir, records) -> None:
         finish_progress_lines()
         if args.model_variant == "original":
             stage = args.ablation_stage or "original_ctrgcn"
+        elif args.model_variant == HAND_CTR_WRIST_VARIANT:
+            stage = "body19_ctr+hand_ctr21+head5_wrist_injection"
         elif args.model_variant == "body-local":
             stage = "body22_ctr+hands42_face6_stgcn"
         elif args.model_variant == "body-local-time-aug":
@@ -1199,7 +1308,7 @@ def _run(args, save_dir, records) -> None:
         train_metrics = run_epoch(
             train_model, loaders["train"], device, optimizer, progress_context=progress_context,
             log_interval=args.log_interval,
-            records=records, epoch=epoch, learning_rate=learning_rate,
+            records=records, epoch=epoch, learning_rate=learning_rate, lr_scheduler=lr_scheduler,
         )
         if args.model_variant == ACTION_PROXIMITY_VARIANT:
             print(f"interaction: strength={train_metrics['interaction_strength']:.3f} "
@@ -1208,6 +1317,8 @@ def _run(args, save_dir, records) -> None:
                   f"edges/sample={train_metrics['interaction_edges_per_sample']:.1f} "
                   f"baseline_top1={train_metrics['baseline_top1']:.4f}", flush=True)
         print(f"Eval epoch: {epoch}/{args.epochs}", flush=True)
+        if lr_scheduler is not None:
+            learning_rate = train_metrics["lr_last"]
         progress_context["completed_before"] = completed_before + train_steps
         val_metrics = run_epoch(
             train_model, loaders["val"], device, progress_context=progress_context, log_interval=args.log_interval,
@@ -1239,8 +1350,9 @@ def _run(args, save_dir, records) -> None:
             "args": vars(args), "val_loss": val_loss, "val_accuracy": val_accuracy,
             "best_accuracy": best_accuracy, "architecture": model.ARCHITECTURE,
             "model_config": model_config, "best_epoch": best_epoch,
-            "lr_schedule": {"last_epoch_index": epoch - 1, "warmup_epochs": args.warmup_epochs,
-                            "milestones": args.lr_steps, "decay": args.lr_decay, "base_lr": args.lr},
+            "lr_schedule": (lr_scheduler.state_dict() if lr_scheduler is not None else
+                            {"last_epoch_index": epoch - 1, "warmup_epochs": args.warmup_epochs,
+                             "milestones": args.lr_steps, "decay": args.lr_decay, "base_lr": args.lr}),
             "train_metrics": train_metrics, "val_metrics": val_metrics,
             "stage": stage,
         }
