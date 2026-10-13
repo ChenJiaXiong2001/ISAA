@@ -1094,10 +1094,9 @@ def _run(args, save_dir, records) -> None:
             # for this mask-heavy fusion graph.  Keep the complete neural
             # model compiled with Inductor while disabling only capture; this
             # is still a required torch.compile path and never an eager fallback.
-            train_model = torch.compile(
-                model, mode=args.compile_mode,
-                options={"triton.cudagraphs": False},
-            )
+            compile_options = dict(torch._inductor.list_mode_options(args.compile_mode))
+            compile_options["triton.cudagraphs"] = False
+            train_model = torch.compile(model, options=compile_options)
         else:
             train_model = torch.compile(model, mode=args.compile_mode)
     else:
