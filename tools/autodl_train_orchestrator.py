@@ -125,11 +125,20 @@ def wait_for(api: Api, uuid: str, expected: str, logger: logging.Logger, attempt
 
 
 def ssh_connect(instance: Instance) -> paramiko.SSHClient:
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(instance.host, port=instance.port, username="root", password=instance.password,
-                   timeout=30, auth_timeout=30, banner_timeout=30)
-    return client
+    last_error = None
+    for attempt in range(1, 7):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(instance.host, port=instance.port, username="root", password=instance.password,
+                           timeout=30, auth_timeout=30, banner_timeout=30)
+            return client
+        except Exception as exc:
+            last_error = exc
+            client.close()
+            if attempt < 6:
+                time.sleep(10)
+    raise RuntimeError(f"SSH connection failed after retries: {last_error}")
 
 
 def remote_exec(client: paramiko.SSHClient, command: str, timeout: int = 60) -> tuple[int, str, str]:
