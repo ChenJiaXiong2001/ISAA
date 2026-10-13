@@ -148,8 +148,8 @@ def deploy_bundle(client: paramiko.SSHClient, logger: logging.Logger) -> None:
     command = (
         f"set -e; mkdir -p {REMOTE_PROJECT}; "
         f"if [ ! -d {REMOTE_PROJECT}/.git ]; then git init {REMOTE_PROJECT}; fi; "
-        f"git -C {REMOTE_PROJECT} fetch {remote_bundle} refs/heads/master:refs/remotes/bundle/master; "
-        f"git -C {REMOTE_PROJECT} checkout -f FETCH_HEAD; "
+        f"git -C {REMOTE_PROJECT} fetch {remote_bundle} HEAD:refs/remotes/bundle/current; "
+        f"git -C {REMOTE_PROJECT} checkout -f refs/remotes/bundle/current; "
         f"git -C {REMOTE_PROJECT} log -1 --oneline"
     )
     code, out, err = remote_exec(client, command)
