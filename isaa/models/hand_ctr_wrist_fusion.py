@@ -37,6 +37,7 @@ class HandCTRWristFusion(nn.Module):
     HEAD_OUTPUT_CHANNELS = 48
     INJECTION_BLOCK = 4
     LOCAL_COORDINATE_MODE = "torso_relative"
+    COMPILE_MICROBATCH = 2
 
     def __init__(self, num_classes: int = 60):
         super().__init__()
@@ -119,8 +120,9 @@ class HandCTRWristFusion(nn.Module):
         self._compiled_body_input_norm = None
         self._compiled_injection_stage = None
         self._compiled_readout_stage = None
+        self._compile_microbatch = self.COMPILE_MICROBATCH
 
-    def enable_staged_compile(self, options: dict) -> None:
+    def enable_staged_compile(self, options: dict, *, microbatch: int = COMPILE_MICROBATCH) -> None:
         """Compile the neural stages separately to keep batch-32 graphs bounded.
 
         The Python orchestration and geometry/masking preparation stay eager,
@@ -128,11 +130,26 @@ class HandCTRWristFusion(nn.Module):
         is compiled with Inductor.  This avoids one monolithic graph without
         disabling compilation for the added neural path.
         """
+        if microbatch < 1:
+            raise ValueError("compile microbatch must be positive")
+        self._compile_microbatch = int(microbatch)
         self._compiled_hand_blocks = [torch.compile(block, options=dict(options)) for block in self.hand_blocks]
         self._compiled_body_blocks = [torch.compile(block, options=dict(options)) for block in self.body_blocks]
         self._compiled_body_input_norm = torch.compile(self.body_input_norm, options=dict(options))
         self._compiled_injection_stage = torch.compile(self._run_injection_stage_impl, options=dict(options))
         self._compiled_readout_stage = torch.compile(self._run_readout_stage_impl, options=dict(options))
+
+    def _chunked(self, function, *tensors):
+        size = tensors[0].size(0)
+        if size <= self._compile_microbatch:
+            result = function(*tensors)
+            return result if isinstance(result, tuple) else (result,)
+        outputs = []
+        for start in range(0, size, self._compile_microbatch):
+            end = min(size, start + self._compile_microbatch)
+            result = function(*(tensor[start:end] for tensor in tensors))
+            outputs.append(result if isinstance(result, tuple) else (result,))
+        return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))
 
     @property
     def injection_scale(self) -> torch.Tensor:
@@ -251,7 +268,7 @@ class HandCTRWristFusion(nn.Module):
     def _run_hand(self, hand, hand_mask):
         blocks = self._compiled_hand_blocks if self._compiled_hand_blocks is not None else self.hand_blocks
         for block in blocks:
-            hand, hand_mask = block(hand, hand_mask)
+            hand, hand_mask = self._chunked(block, hand, hand_mask)
         return hand, hand_mask
 
     def _run_body_pre(self, body, body_mask):
@@ -260,11 +277,12 @@ class HandCTRWristFusion(nn.Module):
             return result
         batch, _, time, nodes = body.shape
         norm_mask = body_mask.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(batch, 3 * nodes, time, 1)
-        body = self._compiled_body_input_norm(
+        body, = self._chunked(
+            self._compiled_body_input_norm,
             body.permute(0, 1, 3, 2).reshape(batch, 3 * nodes, time, 1), norm_mask)
         body = body.reshape(batch, 3, nodes, time).permute(0, 1, 3, 2)
         for block in self._compiled_body_blocks[:self.INJECTION_BLOCK]:
-            body, body_mask = block(body, body_mask)
+            body, body_mask = self._chunked(block, body, body_mask)
         return body, body_mask
 
     def forward(self, x: torch.Tensor, valid_frame_mask: torch.Tensor | None = None):
@@ -301,7 +319,7 @@ class HandCTRWristFusion(nn.Module):
                 hand_quality_left, hand_quality_right, hand_valid_left,
                 hand_valid_right, head_quality, head_valid)
         else:
-            body_mid, mid_mask = self._compiled_injection_stage(
+            body_mid, mid_mask = self._chunked(self._compiled_injection_stage,
                 body_mid, body_mid_mask, left_t, right_t, head_values,
                 hand_quality_left, hand_quality_right, hand_valid_left,
                 hand_valid_right, head_quality, head_valid)
@@ -310,10 +328,11 @@ class HandCTRWristFusion(nn.Module):
                 body_mid, mid_mask = block(body_mid, mid_mask)
         else:
             for block in self._compiled_body_blocks[self.INJECTION_BLOCK:]:
-                body_mid, mid_mask = block(body_mid, mid_mask)
+                body_mid, mid_mask = self._chunked(block, body_mid, mid_mask)
         body_t, body_valid = self._masked_pool_nodes(body_mid, mid_mask)
         pooled = body_t.reshape(batch, people, body_t.size(1), body_t.size(2)).mean(1).mean(1)
         if self._compiled_readout_stage is None:
             return self.classifier(self.body_projection(pooled))
-        return self._compiled_readout_stage(pooled)
+        logits, = self._chunked(self._compiled_readout_stage, pooled)
+        return logits
 

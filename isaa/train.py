@@ -1099,7 +1099,8 @@ def _run(args, save_dir, records) -> None:
             model.enable_staged_compile(compile_options)
             train_model = model
             print("compile: staged hand -> body-pre -> wrist-injection -> body-post -> readout; "
-                  "each neural stage uses torch.compile Inductor; geometry orchestration remains eager",
+                  "each neural stage uses torch.compile Inductor; compile_microbatch=2; "
+                  "geometry orchestration remains eager",
                   flush=True)
         else:
             train_model = torch.compile(model, mode=args.compile_mode)
@@ -1124,7 +1125,8 @@ def _run(args, save_dir, records) -> None:
                                       if args.model_variant == HAND_CTR_WRIST_VARIANT else
                                       {"required": True, "suppress_errors": False,
                                        "scope": "staged hand/body encoders, wrist injection, body continuation and readout",
-                                       "eager_control": "geometry and mask orchestration only"}
+                                       "eager_control": "geometry and mask orchestration only",
+                                       "compile_microbatch": 2}
                                       if _is_best_weighted_run(args) else
                                       {"required": True, "suppress_errors": False,
                                        "scope": "model neural computation; existing boundaries preserved"}
