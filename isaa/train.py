@@ -1096,7 +1096,11 @@ def _run(args, save_dir, records) -> None:
             # is still a required torch.compile path and never an eager fallback.
             compile_options = dict(torch._inductor.list_mode_options(args.compile_mode))
             compile_options["triton.cudagraphs"] = False
-            train_model = torch.compile(model, options=compile_options)
+            model.enable_staged_compile(compile_options)
+            train_model = model
+            print("compile: staged hand -> body-pre -> wrist-injection -> body-post -> readout; "
+                  "each neural stage uses torch.compile Inductor; geometry orchestration remains eager",
+                  flush=True)
         else:
             train_model = torch.compile(model, mode=args.compile_mode)
     else:
@@ -1119,8 +1123,8 @@ def _run(args, save_dir, records) -> None:
                                        "eager_control": "original face LocalSTBlock boundary"}
                                       if args.model_variant == HAND_CTR_WRIST_VARIANT else
                                       {"required": True, "suppress_errors": False,
-                                       "scope": "body19/hand21/head5 encoders, pooling, wrist fusion and classifier",
-                                       "eager_control": "none"}
+                                       "scope": "staged hand/body encoders, wrist injection, body continuation and readout",
+                                       "eager_control": "geometry and mask orchestration only"}
                                       if _is_best_weighted_run(args) else
                                       {"required": True, "suppress_errors": False,
                                        "scope": "model neural computation; existing boundaries preserved"}

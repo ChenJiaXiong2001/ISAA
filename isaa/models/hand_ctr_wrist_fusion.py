@@ -114,6 +114,25 @@ class HandCTRWristFusion(nn.Module):
             nn.Linear(self.BODY_CHANNELS[-1], 192), nn.ReLU(),
         )
         self.classifier = nn.Linear(192, num_classes)
+        self._compiled_hand_stage = None
+        self._compiled_body_pre_stage = None
+        self._compiled_injection_stage = None
+        self._compiled_body_post_stage = None
+        self._compiled_readout_stage = None
+
+    def enable_staged_compile(self, options: dict) -> None:
+        """Compile the neural stages separately to keep batch-32 graphs bounded.
+
+        The Python orchestration and geometry/masking preparation stay eager,
+        while every learned encoder, injection, body continuation, and readout
+        is compiled with Inductor.  This avoids one monolithic graph without
+        disabling compilation for the added neural path.
+        """
+        self._compiled_hand_stage = torch.compile(self._run_hand_stage_impl, options=dict(options))
+        self._compiled_body_pre_stage = torch.compile(self._run_body_pre_stage_impl, options=dict(options))
+        self._compiled_injection_stage = torch.compile(self._run_injection_stage_impl, options=dict(options))
+        self._compiled_body_post_stage = torch.compile(self._run_body_post_stage_impl, options=dict(options))
+        self._compiled_readout_stage = torch.compile(self._run_readout_stage_impl, options=dict(options))
 
     @property
     def injection_scale(self) -> torch.Tensor:
@@ -174,10 +193,49 @@ class HandCTRWristFusion(nn.Module):
         xy = (head[:, :2] - torso_center[:, :, :, None]) / torso_scale[:, None, :, None].clamp_min(1e-3)
         values = torch.cat((xy, head[:, 2:3]), dim=1).permute(0, 2, 3, 1)
         values = values.reshape(raw.size(0), raw.size(2), -1)
-        encoded = self.head_encoder(values)
         head_quality = (head_mask[:, 0].to(raw.dtype) * head[:, 2].clamp(0, 1)).mean(-1)
         valid = head_mask[:, 0].any(-1) & torso_reliable
-        return encoded, head_quality, valid
+        return values, head_quality, valid
+
+    def _run_hand_stage_impl(self, hand_left, hand_right, left_mask, right_mask):
+        for block in self.hand_blocks:
+            hand_left, left_mask = block(hand_left, left_mask)
+            hand_right, right_mask = block(hand_right, right_mask)
+        return hand_left, hand_right, left_mask, right_mask
+
+    def _run_body_pre_stage_impl(self, body, body_mask):
+        batch, _, time, nodes = body.shape
+        norm_mask = body_mask.expand(-1, 3, -1, -1).permute(0, 1, 3, 2).reshape(batch, 3 * nodes, time, 1)
+        body = self.body_input_norm(body.permute(0, 1, 3, 2).reshape(batch, 3 * nodes, time, 1), norm_mask)
+        body = body.reshape(batch, 3, nodes, time).permute(0, 1, 3, 2)
+        for block in self.body_blocks[:self.INJECTION_BLOCK]:
+            body, body_mask = block(body, body_mask)
+        return body, body_mask
+
+    def _run_injection_stage_impl(self, body_mid, body_mid_mask, left_t, right_t, head_values,
+                                  hand_quality_left, hand_quality_right, hand_valid_left,
+                                  hand_valid_right, head_quality, head_valid):
+        hand_left = self.hand_projection(left_t) * hand_quality_left.unsqueeze(-1) * hand_valid_left.unsqueeze(-1).to(left_t.dtype)
+        hand_right = self.hand_projection(right_t) * hand_quality_right.unsqueeze(-1) * hand_valid_right.unsqueeze(-1).to(right_t.dtype)
+        head_t = self.head_projection(self.head_encoder(head_values))
+        head_t = head_t * head_quality.unsqueeze(-1) * head_valid.unsqueeze(-1).to(head_t.dtype)
+        scale = self.injection_scale
+        hand_residual = torch.stack((hand_left, hand_right), dim=-1).permute(0, 2, 1, 3) * scale
+        head_residual = head_t.permute(0, 2, 1).unsqueeze(-1) * scale
+        injected = torch.einsum("bctw,wn->bctn", hand_residual, self.wrist_map)
+        injected = injected + torch.einsum("bctw,wn->bctn", head_residual, self.head_map)
+        mid_mask = body_mid_mask | torch.stack((hand_valid_left, hand_valid_right), dim=-1)[:, None, :, :].any(-1, keepdim=True).expand_as(body_mid_mask)
+        mid_mask = mid_mask | head_valid[:, None, :, None].expand_as(body_mid_mask)
+        body_mid = (body_mid + injected).masked_fill(~mid_mask, 0)
+        return body_mid, mid_mask
+
+    def _run_body_post_stage_impl(self, body_mid, body_mask):
+        for block in self.body_blocks[self.INJECTION_BLOCK:]:
+            body_mid, body_mask = block(body_mid, body_mask)
+        return body_mid, body_mask
+
+    def _run_readout_stage_impl(self, pooled):
+        return self.classifier(self.body_projection(pooled))
 
     def _run_body(self, body, body_mask):
         batch, _, time, nodes = body.shape
@@ -191,6 +249,8 @@ class HandCTRWristFusion(nn.Module):
         raise RuntimeError("Body backbone did not reach the configured injection block")
 
     def _run_hand(self, hand, hand_mask):
+        if self._compiled_hand_stage is not None:
+            raise RuntimeError("staged hand compilation requires the paired hand-stage call")
         for block in self.hand_blocks:
             hand, hand_mask = block(hand, hand_mask)
         return hand, hand_mask
@@ -210,42 +270,44 @@ class HandCTRWristFusion(nn.Module):
         x = x.masked_fill(~mask, 0)
         torso_center, torso_scale, torso_reliable = self._torso_geometry(x, mask)
 
-        body = x.index_select(-1, self.body_indices)
-        body_mask = mask.index_select(-1, self.body_indices)
-        _, _, (body_mid, body_mid_mask) = self._run_body(body, body_mask)
-
         hand_left, hand_right, left_mask, right_mask = self._hand_input(x, mask, torso_center, torso_scale)
-        hand_left, left_mask = self._run_hand(hand_left, left_mask)
-        hand_right, right_mask = self._run_hand(hand_right, right_mask)
+        if self._compiled_hand_stage is None:
+            hand_left, left_mask = self._run_hand(hand_left, left_mask)
+            hand_right, right_mask = self._run_hand(hand_right, right_mask)
+        else:
+            hand_left, hand_right, left_mask, right_mask = self._compiled_hand_stage(
+                hand_left, hand_right, left_mask, right_mask)
         left_t, left_valid = self._masked_pool_nodes(hand_left, left_mask)
         right_t, right_valid = self._masked_pool_nodes(hand_right, right_mask)
         hand_quality_left = (left_mask[:, 0].to(x.dtype) * x[:, 2, :, 91:112].clamp(0, 1)).mean(-1)
         hand_quality_right = (right_mask[:, 0].to(x.dtype) * x[:, 2, :, 112:133].clamp(0, 1)).mean(-1)
         hand_valid_left = left_valid & torso_reliable
         hand_valid_right = right_valid & torso_reliable
-        hand_left = (self.hand_projection(left_t) * hand_quality_left.unsqueeze(-1)
-                     * hand_valid_left.unsqueeze(-1).to(x.dtype))
-        hand_right = (self.hand_projection(right_t) * hand_quality_right.unsqueeze(-1)
-                      * hand_valid_right.unsqueeze(-1).to(x.dtype))
-
-        head_t, head_quality, head_valid = self._head_features(x, mask, torso_center, torso_scale, torso_reliable)
-        head_t = self.head_projection(head_t) * head_quality.unsqueeze(-1) * head_valid.unsqueeze(-1).to(x.dtype)
-
-        scale = self.injection_scale
-        hand_residual = torch.stack((hand_left, hand_right), dim=-1).permute(0, 2, 1, 3) * scale
-        head_residual = head_t.permute(0, 2, 1).unsqueeze(-1) * scale
-        # BM x C x T x 2 multiplied by 2 x 19 one-hot wrist map, plus the
-        # independent BM x C x T x 1 head descriptor at the nose.
-        injected = torch.einsum("bctw,wn->bctn", hand_residual, self.wrist_map)
-        injected = injected + torch.einsum("bctw,wn->bctn", head_residual, self.head_map)
-        mid_mask = body_mid_mask | torch.stack((hand_valid_left, hand_valid_right), dim=-1)[:, None, :, :].any(-1, keepdim=True).expand_as(body_mid_mask)
-        mid_mask = mid_mask | head_valid[:, None, :, None].expand_as(body_mid_mask)
-        body_mid = body_mid + injected
-        body_mid = body_mid.masked_fill(~mid_mask, 0)
-        # Continue the body stack after block 4.
-        for block in self.body_blocks[self.INJECTION_BLOCK:]:
-            body_mid, mid_mask = block(body_mid, mid_mask)
+        head_values, head_quality, head_valid = self._head_features(x, mask, torso_center, torso_scale, torso_reliable)
+        body = x.index_select(-1, self.body_indices)
+        body_mask = mask.index_select(-1, self.body_indices)
+        if self._compiled_body_pre_stage is None:
+            _, _, (body_mid, body_mid_mask) = self._run_body(body, body_mask)
+        else:
+            body_mid, body_mid_mask = self._compiled_body_pre_stage(body, body_mask)
+        if self._compiled_injection_stage is None:
+            body_mid, mid_mask = self._run_injection_stage_impl(
+                body_mid, body_mid_mask, left_t, right_t, head_values,
+                hand_quality_left, hand_quality_right, hand_valid_left,
+                hand_valid_right, head_quality, head_valid)
+        else:
+            body_mid, mid_mask = self._compiled_injection_stage(
+                body_mid, body_mid_mask, left_t, right_t, head_values,
+                hand_quality_left, hand_quality_right, hand_valid_left,
+                hand_valid_right, head_quality, head_valid)
+        if self._compiled_body_post_stage is None:
+            for block in self.body_blocks[self.INJECTION_BLOCK:]:
+                body_mid, mid_mask = block(body_mid, mid_mask)
+        else:
+            body_mid, mid_mask = self._compiled_body_post_stage(body_mid, mid_mask)
         body_t, body_valid = self._masked_pool_nodes(body_mid, mid_mask)
         pooled = body_t.reshape(batch, people, body_t.size(1), body_t.size(2)).mean(1).mean(1)
-        return self.classifier(self.body_projection(pooled))
+        if self._compiled_readout_stage is None:
+            return self.classifier(self.body_projection(pooled))
+        return self._compiled_readout_stage(pooled)
 
