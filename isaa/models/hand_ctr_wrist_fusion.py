@@ -151,7 +151,11 @@ class HandCTRWristFusion(nn.Module):
         outputs = []
         for start in range(0, size, self._compile_microbatch):
             end = min(size, start + self._compile_microbatch)
-            result = function(*(tensor[start:end] for tensor in tensors))
+            # Slicing the flattened person batch can preserve a non-contiguous
+            # stride from the 133-joint gather.  Triton 3.4 on RTX 5090 fails
+            # lowering the first hand CTR-GCN block for that stride pattern;
+            # each compiled call receives a compact tensor with fixed strides.
+            result = function(*(tensor[start:end].contiguous() for tensor in tensors))
             outputs.append(result if isinstance(result, tuple) else (result,))
         return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))
 
