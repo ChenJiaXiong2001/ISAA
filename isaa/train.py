@@ -334,7 +334,7 @@ def parse_args() -> argparse.Namespace:
             parser.error("hand-ctr-wrist-fusion fixes window-size=100 and temporal-compression=confidence_weighted")
         if args.epochs != 100 or args.lr_scheduler != "warmup_cosine":
             parser.error("hand-ctr-wrist-fusion fixes 100 epochs with per-update warmup cosine learning rate")
-        if (args.lr != 0.1 or args.warmup_epochs != 5
+        if (args.lr not in (None, 0.1) or args.warmup_epochs != 5
                 or args.warmup_start_lr != 0.001 or args.min_lr != 0.0001):
             parser.error("hand-ctr-wrist-fusion fixes lr=0.1, five warmup epochs, start-lr=0.001 and min-lr=0.0001")
         if args.compile_mode not in (None, "reduce-overhead"):

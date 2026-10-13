@@ -141,7 +141,7 @@ class HandCTRWristFusion(nn.Module):
         reliable = (
             (shoulder_w.sum(-1) > 0)
             & (hip_w.sum(-1) > 0)
-            & (scale > 1e-3)
+            & (scale[:, None, :] > 1e-3)
         ).squeeze(1)
         return (shoulder + hip) * 0.5, scale.clamp_min(1e-3), reliable
 
