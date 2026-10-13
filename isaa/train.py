@@ -1089,12 +1089,24 @@ def _run(args, save_dir, records) -> None:
         if args.model_variant == HAND_CTR_WRIST_VARIANT:
             print("compile: required; body19/hand21/head5 encoders, masked pooling, wrist fusion and classifier compiled; "
                   "no face branch and no whole-model eager fallback", flush=True)
-        train_model = torch.compile(model, mode=args.compile_mode)
+        if args.model_variant == HAND_CTR_WRIST_VARIANT:
+            # The 5090/Triton stack can fail while lowering CUDA-graph capture
+            # for this mask-heavy fusion graph.  Keep the complete neural
+            # model compiled with Inductor while disabling only capture; this
+            # is still a required torch.compile path and never an eager fallback.
+            train_model = torch.compile(
+                model, mode=args.compile_mode,
+                options={"triton.cudagraphs": False},
+            )
+        else:
+            train_model = torch.compile(model, mode=args.compile_mode)
     else:
         print("compile: disabled (--no-compile); running eager model", flush=True)
         train_model = model
     records.update_config(compile={"enabled": compile_enabled, "mode": args.compile_mode,
                                    "allow_unspec_int_on_nn_module": allow_unspec_int,
+                                   **({"options": {"triton.cudagraphs": False}}
+                                      if args.model_variant == HAND_CTR_WRIST_VARIANT else {}),
                                    **({"required": True, "suppress_errors": False,
                                        "scope": "original backbone and interaction neural computation",
                                        "eager_control": "dynamic neighbor construction"}
