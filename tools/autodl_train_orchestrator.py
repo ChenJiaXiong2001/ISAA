@@ -390,11 +390,15 @@ def lifecycle(args):
 
 
 def tail_latest():
-    state = json.loads((STATE_DIR / 'instance.json').read_text(encoding='utf-8'))
-    if 'instance_uuid' not in state: raise RuntimeError('Latest launch has no allocated instance')
+    state_file = STATE_DIR / 'instance.json'
+    state = json.loads(state_file.read_text(encoding='utf-8')) if state_file.exists() else {}
+    if 'instance_uuid' not in state:
+        print(f'当前没有可查看的运行实例；请查看 {state_file} 和 {STATE_DIR / "launcher_stderr_latest.log"}')
+        return
     _, token = read_config(); api = Api(token)
     if api.status(state['instance_uuid']) != 'running':
-        raise RuntimeError(f'Instance is not running; downloaded logs: {LOG_DIR / state["instance_uuid"]}')
+        print(f'实例 {state["instance_uuid"]} 当前不在 running 状态；本地日志目录：{LOG_DIR / state["instance_uuid"]}')
+        return
     snap = api.snapshot(state['instance_uuid'])
     c = ssh_connect(Instance(state['instance_uuid'], snap['proxy_host'], int(snap['ssh_port']), snap['root_password']))
     try:
