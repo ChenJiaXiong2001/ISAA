@@ -6,7 +6,7 @@
 
 ```powershell
 $py = "C:\Users\15637\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-Start-Process -FilePath $py -ArgumentList "-u","tools/autodl_train_orchestrator.py","--check-interval","300","--batch-size","32" -WorkingDirectory "C:\Users\15637\PycharmProjects\ISAA" -RedirectStandardOutput ".autodl_run\launcher_stdout.log" -RedirectStandardError ".autodl_run\launcher_stderr.log" -WindowStyle Hidden
+Start-Process -FilePath $py -ArgumentList "-u","C:\Users\15637\PycharmProjects\ISAA\tools\autodl_train_orchestrator.py","--check-interval","300","--batch-size","32" -WorkingDirectory "C:\Users\15637\PycharmProjects\ISAA" -RedirectStandardOutput "C:\Users\15637\PycharmProjects\ISAA\.autodl_run\launcher_stdout.log" -RedirectStandardError "C:\Users\15637\PycharmProjects\ISAA\.autodl_run\launcher_stderr.log" -WindowStyle Hidden
 ```
 
 脚本运行日志、每次运行的状态和实例 UUID 位于 `.autodl_run/<run-id>/`，最新状态副本为 `.autodl_run/instance.json`。下载后的归档位于 `autodl_training_logs/<instance-uuid>/logs.tar.gz`，其中包含 `training_launcher.log`、runner 状态、完整训练输出和每个文本日志的 SHA256 清单。
