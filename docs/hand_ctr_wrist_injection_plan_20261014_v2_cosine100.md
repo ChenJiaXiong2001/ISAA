@@ -139,7 +139,7 @@ F'_{w_s}(t)=\operatorname{ReLU}(F_{w_s}(t)+d_s(t)).
 | 数据/划分 | 原RTMW ZIP、NTU60 XSub，相同manifest与保留样本 |
 | 类别/人物/窗口 | 60 / 2 / 100 |
 | 逻辑训练batch / 验证batch | 32 / 32 |
-| 编译调用微批次 | 1（仅为 RTX 5090/Triton lowering 稳定性；不改变 optimizer batch） |
+| 编译调用微批次 | 当前诊断代码为1；完整训练未通过，且改变masked BatchNorm统计，不能视为已验收方案 |
 | 梯度累积 | 1 |
 | 轮数 | 100 |
 | 优化器 | SGD，momentum=0.9，Nesterov=true |
@@ -151,7 +151,7 @@ F'_{w_s}(t)=\operatorname{ReLU}(F_{w_s}(t)+d_s(t)).
 | 梯度裁剪 | 第一版0，沿用池化+100帧；新增裁剪需同步受控基线 |
 | seed | 初次1，正式比较至少1/2/3 |
 | workers / prefetch | 8 / 4，按服务器资源核验 |
-| compile | required=true，backend=inductor，mode=reduce-overhead；分阶段编译调用微批次为1 |
+| compile | required=true，backend=inductor，mode=reduce-overhead；分阶段编译验收尚未通过 |
 | TF32 / cuDNN | 沿用当前服务器已验证设置，记录实际版本 |
 | 初始化 | 每次独立实验随机初始化 |
 

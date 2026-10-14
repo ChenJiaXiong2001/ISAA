@@ -37,10 +37,9 @@ class HandCTRWristFusion(nn.Module):
     HEAD_OUTPUT_CHANNELS = 48
     INJECTION_BLOCK = 4
     LOCAL_COORDINATE_MODE = "torso_relative"
-    # Keep the optimizer/data-loader batch independent from the CUDA compiler
-    # shape.  RTX 5090 + Triton 3.4 currently fails lowering some mask-heavy
-    # CTR-GCN graphs at flattened person-batch=2; one sample per compiled call
-    # is the conservative fallback while the logical training batch remains 32.
+    # Experimental compiler shape, not a validated batch-32 training setting.
+    # Chunking changes PointBatchNorm statistics and running-buffer updates.
+    # CUDA probes still fail in hand block 2 even at one person per call.
     COMPILE_MICROBATCH = 1
 
     def __init__(self, num_classes: int = 60):
@@ -151,10 +150,8 @@ class HandCTRWristFusion(nn.Module):
         outputs = []
         for start in range(0, size, self._compile_microbatch):
             end = min(size, start + self._compile_microbatch)
-            # Slicing the flattened person batch can preserve a non-contiguous
-            # stride from the 133-joint gather.  Triton 3.4 on RTX 5090 fails
-            # lowering the first hand CTR-GCN block for that stride pattern;
-            # each compiled call receives a compact tensor with fixed strides.
+            # Give each compiled call compact strides. This alone does not
+            # resolve the RTX 5090/Triton lowering failure in hand block 2.
             result = function(*(tensor[start:end].contiguous() for tensor in tensors))
             outputs.append(result if isinstance(result, tuple) else (result,))
         return tuple(torch.cat(parts, dim=0) for parts in zip(*outputs))

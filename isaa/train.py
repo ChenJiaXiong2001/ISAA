@@ -1087,13 +1087,12 @@ def _run(args, save_dir, records) -> None:
             print("compile: required; original body/hand encoders, pooling, fusion and classifier compiled; "
                   "original face LocalSTBlock boundary retained; no whole-model eager fallback", flush=True)
         if args.model_variant == HAND_CTR_WRIST_VARIANT:
-            print("compile: required; body19/hand21/head5 encoders, masked pooling, wrist fusion and classifier compiled; "
+            print("compile: required; body19/hand21/head5 neural encoders, wrist fusion and classifier compiled; "
                   "no face branch and no whole-model eager fallback", flush=True)
         if args.model_variant == HAND_CTR_WRIST_VARIANT:
-            # The 5090/Triton stack can fail while lowering CUDA-graph capture
-            # for this mask-heavy fusion graph.  Keep the complete neural
-            # model compiled with Inductor while disabling only capture; this
-            # is still a required torch.compile path and never an eager fallback.
+            # Disable CUDA graph capture while diagnosing the Triton lowering
+            # failure. Capture is not the established cause; all neural stages
+            # still require Inductor compilation and failures are fatal.
             compile_options = dict(torch._inductor.list_mode_options(args.compile_mode))
             compile_options["triton.cudagraphs"] = False
             model.enable_staged_compile(compile_options)
@@ -1101,7 +1100,8 @@ def _run(args, save_dir, records) -> None:
             print("compile: staged hand -> body-pre -> wrist-injection -> body-post -> readout; "
                   f"each neural stage uses torch.compile Inductor; "
                   f"compile_microbatch={model._compile_microbatch}; "
-                  "geometry orchestration remains eager",
+                  "geometry, masks and parameter-free node pooling remain eager; "
+                  "experimental microbatching changes PointBatchNorm statistics",
                   flush=True)
         else:
             train_model = torch.compile(model, mode=args.compile_mode)
@@ -1123,12 +1123,13 @@ def _run(args, save_dir, records) -> None:
                                       {"required": True, "suppress_errors": False,
                                        "scope": "original body/hand encoders, pooling, fusion and classifier",
                                        "eager_control": "original face LocalSTBlock boundary"}
-                                      if args.model_variant == HAND_CTR_WRIST_VARIANT else
+                                      if _is_best_weighted_run(args) else
                                       {"required": True, "suppress_errors": False,
                                        "scope": "staged hand/body encoders, wrist injection, body continuation and readout",
-                                       "eager_control": "geometry and mask orchestration only",
+                                       "eager_control": "geometry, masks and parameter-free node pooling",
+                                       "microbatch_status": "experimental; changes PointBatchNorm statistics; CUDA validation pending",
                                        "compile_microbatch": model._compile_microbatch}
-                                      if _is_best_weighted_run(args) else
+                                      if args.model_variant == HAND_CTR_WRIST_VARIANT else
                                       {"required": True, "suppress_errors": False,
                                        "scope": "model neural computation; existing boundaries preserved"}
                                       if args.lr_scheduler == "warmup_cosine" else {})})
