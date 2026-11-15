@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "gate_sigma": 0.5,
+  "gate_initial_mu": 1.0,
+  "sparsity_weight": 0.1,
+  "gate_warmup_epochs": 5,
+  "gate_ramp_epochs": 20,
+  "export_threshold": 0.5
+}

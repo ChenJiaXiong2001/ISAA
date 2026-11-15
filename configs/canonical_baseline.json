@@ -1,0 +1,33 @@
+{
+  "name": "original_pooled_100_frame_100_epoch",
+  "role": "canonical_baseline",
+  "model_variant": "body-local-hand-ctr-wide-relative",
+  "architecture": "rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_torso_relative_v3",
+  "evaluation": {
+    "split": "xsub60",
+    "partition": "val",
+    "top1_percent": 94.64000981233902,
+    "top1_display_percent": 94.6400,
+    "top5_percent": 99.58910830369189,
+    "correct": 15432,
+    "samples": 16306,
+    "best_epoch": 98
+  },
+  "training": {
+    "epochs": 100,
+    "window_size": 100,
+    "temporal_compression": "confidence_weighted",
+    "batch_size": 32,
+    "test_batch_size": 32,
+    "seed": 1,
+    "initialization": "random_from_scratch",
+    "compile_required": true
+  },
+  "checkpoint": {
+    "local_path": "runtime/pool_100/best.pt",
+    "evaluation_record": "outputs/evaluations/pool_weighted_100_cosine_20261016/summary.json",
+    "training_config": "outputs/evaluations/pool_weighted_100_cosine_20261016/config.json",
+    "sha256": "674643b36e5fe77888f315c5b735259e5ba0f4109321c06d0c343d4b0748113f"
+  },
+  "notes": "Canonical baseline for comparisons. This designation does not change the default training model or alter any historical experiment."
+}

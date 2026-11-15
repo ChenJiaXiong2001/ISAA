@@ -1,0 +1,21 @@
+{
+  "backbone": "ctrgcn",
+  "split": "xsub60",
+  "stream": "j",
+  "window_size": 100,
+  "max_persons": 2,
+  "batch_size": 128,
+  "test_batch_size": 32,
+  "epochs": 24,
+  "repeat": 5,
+  "lr": 0.1,
+  "momentum": 0.9,
+  "weight_decay": 0.0005,
+  "seed": 1,
+  "image_height": 1080,
+  "image_width": 1920,
+  "compile": true,
+  "compile_backend": "inductor",
+  "compile_fullgraph": true,
+  "compile_cudagraphs": false
+}

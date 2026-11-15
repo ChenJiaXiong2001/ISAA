@@ -30,6 +30,7 @@ class BestWeighted100Tests(unittest.TestCase):
         self.assertEqual((args.window_size, args.temporal_compression), (100, "confidence_weighted"))
         self.assertEqual((args.feature_mode, args.node_count, args.max_persons), ("raw", 133, 2))
         self.assertEqual((args.lr, args.epochs, args.batch_size, args.test_batch_size), (.1, 65, 32, 32))
+        self.assertEqual((args.lr_scheduler, args.lr_steps), ('step', [35, 55]))
         self.assertEqual(args.save_dir, "outputs/best_weighted_100_ntu60_xsub")
         self.assertTrue(args.compile)
         self.assertIsNone(args.init_checkpoint)
@@ -110,6 +111,60 @@ class BestWeighted100Tests(unittest.TestCase):
             finally:
                 if dataset._archive is not None:
                     dataset._archive.close()
+
+    def test_precompression_anchor_dropout_is_training_only_and_keeps_clean_mix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive = Path(tmp) / "samples.zip"
+            self.make_archive(archive)
+            base = dict(archive_path=archive, split="train", split_protocol="xsub60",
+                        window_size=100, num_joints=133, num_classes=2, layout="rtmw_133",
+                        feature_mode="raw", temporal_compression="confidence_weighted")
+            clean = RTMWZipDataset(**base, augment=True)
+            hidden = RTMWZipDataset(
+                **base, augment=True,
+                augmentation_config={
+                    "precompression_anchor_dropout_probability": 1.0,
+                    "precompression_anchor_clean_sample_probability": 0.0,
+                },
+            )
+            clean_mix = RTMWZipDataset(
+                **base, augment=True,
+                augmentation_config={
+                    "precompression_anchor_dropout_probability": 1.0,
+                    "precompression_anchor_clean_sample_probability": 1.0,
+                },
+            )
+            val_base = {**base, "split": "val"}
+            validation = RTMWZipDataset(**val_base, augment=False)
+            validation_with_dropout_config = RTMWZipDataset(
+                **val_base, augment=False,
+                augmentation_config={
+                    "precompression_anchor_dropout_probability": 1.0,
+                    "precompression_anchor_clean_sample_probability": 0.0,
+                },
+            )
+            try:
+                clean_x, clean_y, clean_mask = clean[0]
+                hidden_x, hidden_y, hidden_mask = hidden[0]
+                mixed_x, mixed_y, mixed_mask = clean_mix[0]
+                val_x, val_y, val_mask = validation[0]
+                configured_val_x, configured_val_y, configured_val_mask = validation_with_dropout_config[0]
+                anchors = list((5, 6, 11, 12))
+                self.assertTrue(torch.equal(hidden_x[2, :, anchors], torch.zeros_like(hidden_x[2, :, anchors])))
+                self.assertTrue(torch.equal(hidden_x[:, :, [i for i in range(133) if i not in anchors]],
+                                            clean_x[:, :, [i for i in range(133) if i not in anchors]]))
+                self.assertTrue(torch.equal(hidden_y, clean_y))
+                self.assertTrue(torch.equal(hidden_mask, clean_mask))
+                torch.testing.assert_close(mixed_x, clean_x, rtol=0, atol=0)
+                self.assertTrue(torch.equal(mixed_y, clean_y))
+                self.assertTrue(torch.equal(mixed_mask, clean_mask))
+                torch.testing.assert_close(configured_val_x, val_x, rtol=0, atol=0)
+                self.assertTrue(torch.equal(configured_val_y, val_y))
+                self.assertTrue(torch.equal(configured_val_mask, val_mask))
+            finally:
+                for dataset in (clean, hidden, clean_mix, validation, validation_with_dropout_config):
+                    if dataset._archive is not None:
+                        dataset._archive.close()
 
     @unittest.skipUnless(os.environ.get("ISAA_TEST_DEVICE") == "cuda", "Real compiled training runs on the server with ISAA_TEST_DEVICE=cuda")
     def test_cuda_compiled_training_config_checkpoint_and_evaluation(self):

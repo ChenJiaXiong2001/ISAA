@@ -212,6 +212,10 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
             hand, hand_mask = block(hand, hand_mask)
         return hand, hand_mask
 
+    def _exchange_encoded_branches(self, body, left, right, face):
+        """Hook for additive cross-region feature exchange variants."""
+        return body, left, right, face
+
     @staticmethod
     def _pool_nodes_per_frame(x, mask):
         w = mask.to(x.dtype)
@@ -307,6 +311,9 @@ class BodyLocalHandCTRRelativeFusion(BodyLocalRelativeFusion):
         face = fm.to(x.dtype).mul(fx).sum(-1) / fc.clamp_min(1)
         face_mask = fc > 0
         face, face_mask = self._run_face(face, face_mask)
+        (body, bm), (hand0, hm0), (hand1, hm1), (face, face_mask) = self._exchange_encoded_branches(
+            (body, bm), (hand0, hm0), (hand1, hm1), (face, face_mask)
+        )
         face_t, face_valid = self._pool_nodes_per_frame(face, face_mask)
 
         body_t, body_valid = self._pool_nodes_per_frame(body, bm)
@@ -343,6 +350,22 @@ class BodyLocalHandCTRWideRelativeFusion(BodyLocalHandCTRRelativeFusion):
     ARCHITECTURE = "rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_torso_relative_v3"
     HAND_CHANNELS = (32, 32, 64, 64, 96, 96)
     HAND_INPUT_CHANNELS = 6
+
+
+SAME_CHANNEL_VARIANT = "body-local-hand-ctr-wide-relative-same-channel-late-aug"
+
+
+class BodyLocalHandCTRSameChannelLateAugFusion(BodyLocalHandCTRWideRelativeFusion):
+    """Scratch-trained pooled baseline with a matched torso/hand width.
+
+    The hand stack follows the torso stack exactly.  Its final 192 channels
+    are still projected to the historical 48-channel local fusion width, so
+    this isolates encoder width from the classifier contract.  The training
+    entry enables a late, gradual spatial augmentation curriculum.
+    """
+
+    ARCHITECTURE = "rtmw_ctr22_handctr21_same_channel_pooled_late_aug_v1"
+    HAND_CHANNELS = BodyLocalHandCTRWideRelativeFusion.CHANNELS
 
 
 class BodyLocalHandCTRWideRelativeRoutedFusion(BodyLocalHandCTRWideRelativeFusion):

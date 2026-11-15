@@ -1,0 +1,12 @@
+{
+  "version": 4,
+  "gate_temperature": 0.67,
+  "gate_lr": 0.001,
+  "sparsity_weight": 0.01,
+  "gate_warmup_epochs": 5,
+  "gate_ramp_epochs": 20,
+  "gate_noise_ramp_epochs": 5,
+  "hard_eval_interval": 5,
+  "gate_health_patience": 5,
+  "export_threshold": 0.5
+}

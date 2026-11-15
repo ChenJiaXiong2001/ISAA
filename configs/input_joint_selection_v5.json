@@ -1,0 +1,17 @@
+{
+  "version": 5,
+  "gate_temperature": 1.0,
+  "gate_lr": 0.0001,
+  "sparsity_weight": 0.1,
+  "gate_warmup_epochs": 5,
+  "gate_learning_epochs": 10,
+  "gate_ramp_epochs": 30,
+  "gate_noise_ramp_epochs": 1,
+  "gate_exploration": 0.05,
+  "gate_logit_bound": 4.0,
+  "gate_logit_guard_weight": 0.01,
+  "gate_max_grad_norm": 0.5,
+  "hard_eval_interval": 5,
+  "gate_health_patience": 2,
+  "export_threshold": 0.5
+}

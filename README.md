@@ -2,9 +2,11 @@
 
 **Interpretable Skeleton-Based Action Analysis / 基于骨架的可解释动作分析**
 
-ISAA 当前默认模型是 **BodyLocalFullGCNFusion**（`body-local-hand-ctr-wide-relative-full`）：以当前最佳 wide-relative 模型为基础，把身体、双手和面部 GCN 升级为独立可复用的完整骨干。
+目录用途、代码与运行产物的划分，以及本地 / GitHub / 服务器的同步约定，见 [项目目录与同步说明](docs/project_layout_and_sync.md)。
 
-当前最佳已训练模型是 `body-local-hand-ctr-wide-relative`：NTU60 XSub 原训练 Top-1 **93.0823%**，统一复测 **93.0946%**。最新 routed 模型复测为 92.2912%。完整版本尚未全量训练，其准确率待验证。结果依据见 `outputs/evaluations/baseline_vs_routed/report.md`。
+ISAA 当前默认模型是 **BodyLocalFullGCNFusion**（`body-local-hand-ctr-wide-relative-full`）：以 canonical baseline 的 wide-relative 结构为基础，把身体、双手和面部 GCN 升级为独立可复用的完整骨干。
+
+项目当前 canonical baseline 已设为原池化 100 帧/100 轮模型：`body-local-hand-ctr-wide-relative`。它在 NTU60 XSub 上的统一评估 Top-1 为 **94.6400%**（15,432/16,306），Top-5 为 **99.5891%**，第 98 轮为最佳 checkpoint。完整 GCN 版本仍是独立的待验证升级方案；baseline 记录见 [`configs/canonical_baseline.json`](configs/canonical_baseline.json)，完整评估证据见 `outputs/evaluations/pool_weighted_100_cosine_20261016/summary.json`。
 
 完整版本的骨干独立存放于 `isaa/models/backbones/ctrgcn.py` 与 `isaa/models/backbones/stgcn.py`，按需导入、调整参数和微调。分支配置见 `configs/full_gcn.json`，接口及训练说明见 [完整 GCN 文档](docs/full_gcn.md)。
 
@@ -165,7 +167,7 @@ python main.py \
 | 参数 | 用途 | 状态 |
 |---|---|---|
 | body-local-hand-ctr-wide-relative-full | 最佳模型的完整 GCN 升级 | 默认，待全量训练 |
-| body-local-hand-ctr-wide-relative | 当前最佳已训练模型，原训练 93.0823% | 最佳结果对照 |
+| body-local-hand-ctr-wide-relative | canonical baseline：原池化 100 帧/100 轮，统一评估 94.6400% | 最佳结果对照 |
 | body-local | 历史 BodyLocalFusion，89.60% | 历史对照 |
 | body-local-dropout | 分支融合 dropout 对照 | 已实现，结果待补 |
 | body-local-relative | 局部支路使用躯干相对坐标 | 已实现，结果待补 |
@@ -321,3 +323,9 @@ python tools/check_hand_ctr_wrist_compile.py --device cuda
 ```
 
 该入口和通用 `isaa.train` 入口都强制启用 `torch.compile`，拒绝 `--no-compile`、旧 checkpoint、resume、协议覆盖和梯度累积；编译失败直接报错。配置见 [手腕注入方案](docs/hand_ctr_wrist_injection_plan_20261014_v2_cosine100.md) 和 [模型配置](configs/hand_ctr_wrist_fusion.json)。
+
+## 本地摄像头体验：原池化 100 帧 / 100 轮
+
+新增独立体验入口见 [`docs/realtime_pool_camera.md`](docs/realtime_pool_camera.md)。它把本地摄像头串成“人物检测 → RTMW-133 全身骨架 → 100 帧窗口 → 原池化 checkpoint 动作识别”，不会改变训练入口或已有实验。服务器 checkpoint/配置使用 `tools/download_pool_runtime.py` 下载，主机和密钥由命令行提供，不写死在仓库中。
+
+最新最佳模型与原论文 CTR-GCN 的远程摄像头对比见 [`docs/remote_best_vs_ctrgcn_camera.md`](docs/remote_best_vs_ctrgcn_camera.md)，入口为 `run_remote_full_action.cmd`。两条分支各自执行人物框和节点提取，摄像头帧通过 SSH 传到服务器计算后返回结果。

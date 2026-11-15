@@ -19,6 +19,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--compile-mode", default="reduce-overhead")
+    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--frames", type=int, default=16)
     options = parser.parse_args()
     device = torch.device(options.device)
     if device.type != "cuda" or not torch.cuda.is_available():
@@ -26,14 +28,18 @@ def main() -> None:
 
     torch.manual_seed(17)
     model = HandCTRWristFusion(num_classes=60).to(device).train()
-    compiled = torch.compile(model, mode=options.compile_mode)
+    compile_options = dict(torch._inductor.list_mode_options(options.compile_mode))
+    compile_options["triton.cudagraphs"] = False
+    model.enable_staged_compile(compile_options, microbatch=1)
+    compiled = model
     optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-    x = torch.randn(2, 3, 100, 133, 2, device=device) * 0.05
-    x[:, 2] = torch.rand(2, 100, 133, 2, device=device)
-    frame_mask = torch.ones(2, 100, device=device, dtype=torch.bool)
-    labels = torch.tensor([1, 4], device=device)
+    batch = options.batch_size
+    x = torch.randn(batch, 3, options.frames, 133, 2, device=device) * 0.05
+    x[:, 2] = torch.rand(batch, options.frames, 133, 2, device=device)
+    frame_mask = torch.ones(batch, options.frames, device=device, dtype=torch.bool)
+    labels = torch.arange(batch, device=device) % 60
 
-    for update in range(2):
+    for update in range(1):
         optimizer.zero_grad(set_to_none=True)
         logits = compiled(x, frame_mask)
         loss = torch.nn.functional.cross_entropy(logits, labels)

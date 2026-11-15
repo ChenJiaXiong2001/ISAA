@@ -10,7 +10,7 @@ from torch.nn import functional as F
 
 from isaa.graph.adjacency import build_joint_spatial_partitions, normalize_adjacency_partitions
 from isaa.graph.regions import build_region_partition
-from isaa.layouts.rtmw_133 import get_rtmw_node_indices
+from isaa.layouts.rtmw_133 import RTMW_133_FACE_GROUPS, get_rtmw_node_indices
 from isaa.models.normalization import PlainSkeletonBatchNorm1d, _masked_stats_chunk_size
 
 
@@ -93,8 +93,7 @@ class FixedSkeletonConv(nn.Module):
 class FaceTokenCompression(nn.Module):
     """Masked raw-input means: 65 unchanged joints followed by six face tokens."""
 
-    FACE_GROUPS = (tuple(range(23, 34)), tuple(range(34, 45)), tuple(range(45, 56)),
-                   tuple(range(56, 67)), tuple(range(67, 79)), tuple(range(79, 91)))
+    FACE_GROUPS = RTMW_133_FACE_GROUPS
 
     def __init__(self, adjacency, owners):
         super().__init__()

@@ -11,6 +11,10 @@ from isaa.skeleton_layout import RegionSpec, SkeletonLayoutSpec, register_skelet
 
 RTMW_133_LAYOUT_NAME = "rtmw_133"
 RTMW_133_NUM_JOINTS = 133
+RTMW_133_FACE_GROUPS = (
+    tuple(range(23, 34)), tuple(range(34, 45)), tuple(range(45, 56)),
+    tuple(range(56, 67)), tuple(range(67, 79)), tuple(range(79, 91)),
+)
 RTMW_133_INPUT_CHANNELS = 5
 RTMW_133_WINDOW_SIZE = 64
 RTMW_133_NUM_REGIONS = 32

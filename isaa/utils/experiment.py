@@ -54,7 +54,8 @@ class RunRecords:
         self.update_config()
         # Archive the actual source used by this run, excluding data and weights.
         with ZipFile(directory / "source.zip", "w", ZIP_DEFLATED) as archive:
-            paths = [root / "main.py", root / "requirements.txt", *sorted((root / "isaa").rglob("*.py"))]
+            paths = [root / "main.py", root / "requirements.txt", *sorted(root.glob("train*.py")),
+                     *sorted((root / "isaa").rglob("*.py"))]
             for path in paths:
                 if path.is_file():
                     archive.write(path, path.relative_to(root).as_posix())

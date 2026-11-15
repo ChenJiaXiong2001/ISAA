@@ -27,6 +27,19 @@ from isaa.data.skeleton_dataset import (
     _scale_range_from_config,
     _temporal_crop_or_pad_sample_with_mask,
 )
+from isaa.layouts.rtmw_133 import RTMW_133_FACE_GROUPS
+
+
+RTMW_133_FINGER_GROUPS = tuple(
+    tuple(base + finger_start + offset for offset in range(4))
+    for base in (91, 112)
+    for finger_start in (1, 5, 9, 13, 17)
+)
+
+# Face/hand anchor joints used by the pair model's geometric and confidence
+# pathways.  This is intentionally a separate optional augmentation from the
+# existing post-compression body/group dropout.
+RTMW_133_PRECOMPRESSION_ANCHORS = (5, 6, 11, 12)
 
 
 NTU60_XSUB_TRAIN_SUBJECTS = frozenset(
@@ -383,6 +396,31 @@ class RTMWZipDataset(Dataset):
         self.temporal_compression = temporal_compression
         self._archive: zipfile.ZipFile | None = None
         self._archive_pid: int | None = None
+        # Shared with persistent DataLoader workers so the curriculum changes
+        # are visible without recreating the loader every epoch.
+        self._epoch_state = torch.zeros(2, dtype=torch.int64).share_memory_()
+
+    def set_epoch(self, epoch: int, enabled: bool | None = None) -> None:
+        """Update the epoch used by a late augmentation curriculum."""
+        self._epoch_state[0] = int(epoch)
+        if enabled is not None:
+            self._epoch_state[1] = int(bool(enabled))
+        self._refresh_late_augmentation()
+
+    def _refresh_late_augmentation(self) -> None:
+        epoch = int(self._epoch_state[0].item())
+        if int(self._epoch_state[1].item()) == 0:
+            return
+        start = int(self.augmentation_config.get("late_start_epoch", 0))
+        end = int(self.augmentation_config.get("late_end_epoch", start))
+        if start <= 0 or end <= start or self.split != "train" or self.temporal_compression != "confidence_weighted":
+            return
+        progress = min(1.0, max(0.0, (epoch - start) / float(end - start)))
+        self.augmentation_config["rotation_degrees"] = float(self.augmentation_config.get("late_max_rotation_degrees", 10.0)) * progress
+        max_scale = float(self.augmentation_config.get("late_max_scale_delta", 0.10)) * progress
+        self.augmentation_config["scale_range"] = (1.0 - max_scale, 1.0 + max_scale)
+        self.augmentation_config["coordinate_jitter_std"] = float(self.augmentation_config.get("late_max_jitter_std", 0.003)) * progress
+        self.augmentation_config["joint_dropout_probability"] = float(self.augmentation_config.get("late_max_joint_dropout", 0.05)) * progress
 
     def __len__(self) -> int:
         return len(self.members)
@@ -462,10 +500,41 @@ class RTMWZipDataset(Dataset):
         return raw.contiguous(), valid_frame_mask.bool().contiguous()
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self._refresh_late_augmentation()
         raw, file_mask = self._read_raw_sample(index)
         raw = _align_joint_count(raw, expected_num_joints=self.num_joints)
         random_crop = self.augment and bool(self.augmentation_config.get("random_temporal_crop", False))
         if self.temporal_compression == "confidence_weighted":
+            precompression_probability = float(
+                self.augmentation_config.get(
+                    "precompression_anchor_dropout_probability", 0.0
+                )
+            )
+            clean_sample_probability = float(
+                self.augmentation_config.get(
+                    "precompression_anchor_clean_sample_probability", 0.0
+                )
+            )
+            if not 0.0 <= clean_sample_probability <= 1.0:
+                raise ValueError(
+                    "precompression_anchor_clean_sample_probability must be in [0, 1]"
+                )
+            if self.split == "train" and self.augment and precompression_probability > 0.0:
+                if not 0.0 <= precompression_probability <= 1.0:
+                    raise ValueError(
+                        "precompression_anchor_dropout_probability must be in [0, 1]"
+                    )
+                if torch.rand(()) >= clean_sample_probability:
+                    anchor_scores = raw[2, :, RTMW_133_PRECOMPRESSION_ANCHORS, :]
+                    valid_anchor = anchor_scores > 0
+                    hide = torch.rand(valid_anchor.shape) < precompression_probability
+                    hide &= valid_anchor
+                    raw[2, :, RTMW_133_PRECOMPRESSION_ANCHORS, :] = anchor_scores.masked_fill(
+                        hide, 0.0
+                    )
+                    raw[:2, :, RTMW_133_PRECOMPRESSION_ANCHORS, :] *= (
+                        ~hide
+                    ).to(raw.dtype).unsqueeze(0)
             raw, file_mask = _confidence_weighted_temporal_compress(
                 raw, file_mask, self.window_size
             )
@@ -489,6 +558,35 @@ class RTMWZipDataset(Dataset):
                 ),
                 jitter_std=float(self.augmentation_config.get("coordinate_jitter_std", 0.0)),
             )
+            # Late-course regularization may randomly hide a small number of
+            # joints after geometric augmentation.  Scores are modified on
+            # the raw sample so all derived torso-relative and cross-hand
+            # channels are rebuilt consistently below.
+            dropout_probability = float(
+                self.augmentation_config.get("joint_dropout_probability", 0.0)
+            )
+            if dropout_probability > 0.0:
+                if not 0.0 <= dropout_probability <= 1.0:
+                    raise ValueError("joint_dropout_probability must be in [0, 1]")
+                valid_points = raw[2] > 0
+                keep = torch.ones(valid_points.shape, dtype=torch.bool)
+                keep[:, :23, :] = torch.rand(valid_points[:, :23, :].shape) >= dropout_probability
+                raw[2] = raw[2] * (valid_points & keep).to(raw.dtype)
+                raw[:2] = raw[:2] * (raw[2:3] > 0)
+            group_dropout_probability = float(
+                self.augmentation_config.get("grouped_joint_dropout_probability", 0.0)
+            )
+            if group_dropout_probability > 0.0:
+                if not 0.0 <= group_dropout_probability <= 1.0:
+                    raise ValueError("grouped_joint_dropout_probability must be in [0, 1]")
+                if raw.size(2) != 133:
+                    raise ValueError("grouped joint dropout requires the 133-joint RTMW layout")
+                group_keep = torch.ones(raw.size(1), raw.size(2), dtype=torch.bool)
+                for group in RTMW_133_FINGER_GROUPS + RTMW_133_FACE_GROUPS:
+                    hide = torch.rand(raw.size(1)) < group_dropout_probability
+                    group_keep[:, group] &= ~hide[:, None]
+                raw[2] *= group_keep[:, :, None]
+                raw[:2] *= group_keep[None, :, :, None]
 
         point_valid = raw[2:3] > 0
         raw[:2] = raw[:2] * point_valid

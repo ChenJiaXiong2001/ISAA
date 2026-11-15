@@ -25,6 +25,8 @@ from isaa.models.body_local_full_gcn import FULL_GCN_VARIANT, BodyLocalFullGCNFu
 from isaa.models.hand_body_proximity import PROXIMITY_VARIANT, HandBodyProximityFusion
 from isaa.models.best_hand_body_proximity import BEST_PROXIMITY_VARIANT, BestHandBodyProximityFusion
 from isaa.models.best_no_pool import NO_POOL_VARIANT, BestNoPoolFusion
+from isaa.models.best_hand_relation_fusion import BEST_HAND_RELATION_VARIANT, BestHandRelationFusion
+from isaa.models.body_hand_weighted_pool import BODY_HAND_WEIGHTED_POOL_VARIANT, BodyHandWeightedPoolFusion
 from isaa.models.best_action_hand_body import ACTION_PROXIMITY_VARIANT, BestActionHandBodyFusion
 from isaa.utils.seed import seed_everything
 from isaa.models.class_hand_routed import CLASS_HAND_VARIANT, BodyLocalClassHandRoutedFusion
@@ -68,6 +70,8 @@ def main():
     args = checkpoint["args"]
     classes = {
         NO_POOL_VARIANT: BestNoPoolFusion,
+        BEST_HAND_RELATION_VARIANT: BestHandRelationFusion,
+        BODY_HAND_WEIGHTED_POOL_VARIANT: BodyHandWeightedPoolFusion,
         ACTION_PROXIMITY_VARIANT: BestActionHandBodyFusion,
         BEST_PROXIMITY_VARIANT: BestHandBodyProximityFusion,
         PROXIMITY_VARIANT: HandBodyProximityFusion,
@@ -81,8 +85,9 @@ def main():
     routed = model_class is BodyLocalHandCTRWideRelativeRoutedFusion
     class_routed = model_class is BodyLocalClassHandRoutedFusion
     action_routed = model_class is BestActionHandBodyFusion
-    if options.interaction_mode != "adaptive" and not action_routed:
-        parser.error("--interaction-mode none requires best-action-hand-body")
+    hand_relation = model_class is BestHandRelationFusion
+    if options.interaction_mode != "adaptive" and not (action_routed or hand_relation):
+        parser.error("--interaction-mode none requires a model with an interaction residual")
     seed_everything(args.get("seed", 1))
     device = torch.device(options.device)
     if device.type == "cuda":
@@ -96,6 +101,10 @@ def main():
                          window_size=checkpoint["model_config"]["readout_config"]["window_size"],
                          max_persons=checkpoint["model_config"]["readout_config"]["max_persons"])
              if model_class is BestNoPoolFusion else
+             model_class(num_classes=args["num_classes"],
+                         window_size=args["window_size"],
+                         max_persons=args["max_persons"])
+             if model_class in {BodyHandWeightedPoolFusion, BestHandRelationFusion} else
              model_class(num_classes=args["num_classes"],
                          hand_threshold=args.get("hand_route_threshold", 0.5),
                          confidence_threshold=args.get("body_confidence_threshold", 0.8),
@@ -158,6 +167,8 @@ def main():
                 output = model(x, mask, hand_mode=options.hand_mode, return_routing=True)
             elif action_routed:
                 output = model(x, mask, return_routing=True)
+            elif hand_relation:
+                output = model(x, mask, interaction_enabled=options.interaction_mode != "none")
             else:
                 output = model(x, mask, return_routing=True) if routed else model(x, mask)
             logits = output["logits"] if routed or class_routed or action_routed else output
@@ -227,7 +238,7 @@ def main():
             **{f"mean_{name}": float(values[i] / support[i]) if support[i] else None for name, values in route_sums.items()},
         })
     detail_name = f"best_details_{options.hand_mode}" if class_routed else "best_details"
-    if action_routed:
+    if action_routed or hand_relation:
         detail_name = f"best_details_interaction_{options.interaction_mode}"
     out = options.output_dir or checkpoint_path.parent / detail_name
     out.mkdir(parents=True, exist_ok=True)
@@ -281,6 +292,10 @@ def main():
             "baseline_top1_percent": 100 * interaction_sums["baseline_correct"] / offset,
             "note": "baseline is the co-trained path, not an independently trained original checkpoint",
         }
+    if hand_relation:
+        summary["interaction_mode"] = options.interaction_mode
+        summary["relation_config"] = checkpoint["model_config"]["relation_config"]
+        summary["interaction_note"] = "none disables the residual in this jointly trained checkpoint"
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("RESULT " + json.dumps(summary, ensure_ascii=False), flush=True)
     print(f"Artifacts saved to {out}", flush=True)
