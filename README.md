@@ -4,6 +4,8 @@
 
 目录用途、代码与运行产物的划分，以及本地 / GitHub / 服务器的同步约定，见 [项目目录与同步说明](docs/project_layout_and_sync.md)。
 
+仅收录完整跑完计划的正式训练，见 [已完成训练资料总目录](research/completed_training/README.md)（配置、逐轮指标、日志、评估资料和权重位置）。
+
 ISAA 当前默认模型是 **BodyLocalFullGCNFusion**（`body-local-hand-ctr-wide-relative-full`）：以 canonical baseline 的 wide-relative 结构为基础，把身体、双手和面部 GCN 升级为独立可复用的完整骨干。
 
 项目当前 canonical baseline 已设为原池化 100 帧/100 轮模型：`body-local-hand-ctr-wide-relative`。它在 NTU60 XSub 上的统一评估 Top-1 为 **94.6400%**（15,432/16,306），Top-5 为 **99.5891%**，第 98 轮为最佳 checkpoint。完整 GCN 版本仍是独立的待验证升级方案；baseline 记录见 [`configs/canonical_baseline.json`](configs/canonical_baseline.json)，完整评估证据见 `outputs/evaluations/pool_weighted_100_cosine_20261016/summary.json`。

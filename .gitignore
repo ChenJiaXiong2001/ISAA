@@ -62,3 +62,9 @@ node_modules/
 /shared_eval_result.json
 /topk_rerank*.json
 /x
+
+# Finished-run records are archived locally and on the training server.
+# The catalog and reproducible inventory tools remain versioned.
+/research/completed_training/records/
+/research/completed_training/record_manifest.json
+/research/completed_training/runs/*/original_run

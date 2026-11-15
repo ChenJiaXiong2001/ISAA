@@ -1,0 +1,1282 @@
+[
+  {
+    "host": "server",
+    "path": "outputs/body_local_ntu60_raw/20260929-054834-62a9e0fc",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_ntu60_raw/20260929-054834-62a9e0fc",
+    "run_id": "091069994ae9cb65",
+    "model_variant": "body-local",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.895989206427082,
+    "best_logged_epoch": 65,
+    "updated_at": "2026-09-29T17:41:30+0900",
+    "epochs_sha256": "b85bef08bd7fcabc530e9d440d251ca8dccc4c2e7b92579f9a1b1e917ad16ae3",
+    "folder": "20260929_body-local_09106999",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_ntu60_raw/20260929-054834-62a9e0fc",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_ntu60_raw/20260929-054834-62a9e0fc"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/torso_cross_attn_light_65/20260930-044937-7d2fd154",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/torso_cross_attn_light_65/20260930-044937-7d2fd154",
+    "run_id": "4f2950b24195f856",
+    "model_variant": "torso-cross-attn",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8992395437262357,
+    "best_logged_epoch": 65,
+    "updated_at": "2026-09-30T16:53:54+0900",
+    "epochs_sha256": "88522424eefc1de346b587381658424ef48a382c85e932b58ab1abad8afec25d",
+    "folder": "20260930_torso-cross-attn_4f2950b2",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/torso_cross_attn_light_65/20260930-044937-7d2fd154",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/torso_cross_attn_light_65/20260930-044937-7d2fd154"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_time_aug/20261002-022639-a1bd889f",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_time_aug/20261002-022639-a1bd889f",
+    "run_id": "2aef0fed3687cf1c",
+    "model_variant": "body-local-time-aug",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.887710045382068,
+    "best_logged_epoch": 59,
+    "updated_at": "2026-10-02T13:52:44+0900",
+    "epochs_sha256": "f257f1eac70ada30389ced6fc2a85629883a57cc0b3a26097dd0a6bc5f06f8fe",
+    "folder": "20261002_body-local-time-aug_2aef0fed",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_time_aug/20261002-022639-a1bd889f",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_time_aug/20261002-022639-a1bd889f"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_time_aug_conservative/20261002-135304-a666dd11",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_time_aug_conservative/20261002-135304-a666dd11",
+    "run_id": "fb3e6c3a1c425c1d",
+    "model_variant": "body-local-time-aug",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8855022691033976,
+    "best_logged_epoch": 59,
+    "updated_at": "2026-10-03T01:39:14+0900",
+    "epochs_sha256": "fa3eb6a6b69f969ff09f92454943188b2566300d2c558ae67bbbf3a6de750027",
+    "folder": "20261002_body-local-time-aug_fb3e6c3a",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_time_aug_conservative/20261002-135304-a666dd11",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_time_aug_conservative/20261002-135304-a666dd11"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_time_aug_bs32/20261003-060221-7fb27b24",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_time_aug_bs32/20261003-060221-7fb27b24",
+    "run_id": "d32c3def2047ce94",
+    "model_variant": "body-local-time-aug",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8774684165337913,
+    "best_logged_epoch": 64,
+    "updated_at": "2026-10-03T17:53:27+0900",
+    "epochs_sha256": "0756b9f2a0d3b3ec8ef0c4fb53dae60049bc5d11363cbb29699ae48b2f70c3fa",
+    "folder": "20261003_body-local-time-aug_d32c3def",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_time_aug_bs32/20261003-060221-7fb27b24",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_time_aug_bs32/20261003-060221-7fb27b24"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_bs16_generalization_v2/20261003-181034-5d5ad022",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_bs16_generalization_v2/20261003-181034-5d5ad022",
+    "run_id": "0cfd81f5e5ed33ac",
+    "model_variant": "body-local",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8782043419600147,
+    "best_logged_epoch": 61,
+    "updated_at": "2026-10-04T00:41:08+0900",
+    "epochs_sha256": "2d9824f070816805b5a014cb5425c13a137e9dc61ec54e12e1cab98c3e147286",
+    "folder": "20261003_body-local_0cfd81f5",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_bs16_generalization_v2/20261003-181034-5d5ad022",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_bs16_generalization_v2/20261003-181034-5d5ad022"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_coord_aug_bs32/20261004-021942-67af4434",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_coord_aug_bs32/20261004-021942-67af4434",
+    "run_id": "a4b17d4257c428d1",
+    "model_variant": "body-local-coord-aug",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8842143996075065,
+    "best_logged_epoch": 65,
+    "updated_at": "2026-10-04T08:48:51+0900",
+    "epochs_sha256": "c0129278dde7f706a6d4b7f4784331daacfe2fe71d5acf611553bd8ab3403cd1",
+    "folder": "20261004_body-local-coord-aug_a4b17d42",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_coord_aug_bs32/20261004-021942-67af4434",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_coord_aug_bs32/20261004-021942-67af4434"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_wd08_bs32/20261004-225843-f150042a",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_wd08_bs32/20261004-225843-f150042a",
+    "run_id": "ecd87a0f39ba9309",
+    "model_variant": "body-local",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8933521403164479,
+    "best_logged_epoch": 61,
+    "updated_at": "2026-10-05T05:24:18+0900",
+    "epochs_sha256": "770cf33e13f257f3824f57ff535286de0698fdc9104703ebb6b46b1c638466a0",
+    "folder": "20261004_body-local_ecd87a0f",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_wd08_bs32/20261004-225843-f150042a",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_wd08_bs32/20261004-225843-f150042a"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_relative_bs32/20261005-061108-78273a31",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_relative_bs32/20261005-061108-78273a31",
+    "run_id": "54e441c0af060bab",
+    "model_variant": "body-local-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8995461793204955,
+    "best_logged_epoch": 58,
+    "updated_at": "2026-10-05T12:40:52+0900",
+    "epochs_sha256": "93a880b53f1fdb7f05c90964d90232adc01ac51b590c51a225d6232940b2a896",
+    "folder": "20261005_body-local-relative_54e441c0",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_relative_bs32/20261005-061108-78273a31",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_relative_bs32/20261005-061108-78273a31"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_relative_split_ntu60/20261005-141939-a3eb6d81",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_relative_split_ntu60/20261005-141939-a3eb6d81",
+    "run_id": "6dfcda1580402e67",
+    "model_variant": "body-local-relative-split",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8963571691401938,
+    "best_logged_epoch": 64,
+    "updated_at": "2026-10-05T21:06:30+0900",
+    "epochs_sha256": "c3824fe12bc1b1bb98d6d2023663bffb3a86966bc79f0658daa2d23b7159f312",
+    "folder": "20261005_body-local-relative-split_6dfcda15",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_relative_split_ntu60/20261005-141939-a3eb6d81",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_relative_split_ntu60/20261005-141939-a3eb6d81"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_hand_ctr_relative_bs32_fix/20261005-214615-f43b18a8",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_relative_bs32_fix/20261005-214615-f43b18a8",
+    "run_id": "ed9879f078992288",
+    "model_variant": "body-local-hand-ctr-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9209493437998283,
+    "best_logged_epoch": 59,
+    "updated_at": "2026-10-06T07:51:56+0900",
+    "epochs_sha256": "a6830ff352920e34a78a64c6d8269209a6142936e34ddf6f2034992c1a12a8f4",
+    "folder": "20261005_body-local-hand-ctr-relative_ed9879f0",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_hand_ctr_relative_bs32_fix/20261005-214615-f43b18a8",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_relative_bs32_fix/20261005-214615-f43b18a8"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_hand_ctr_wide_relative_bs32/20261007-024746-0a209458",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_relative_bs32/20261007-024746-0a209458",
+    "run_id": "7abb08ceb8730ba2",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9249356065252055,
+    "best_logged_epoch": 63,
+    "updated_at": "2026-10-07T11:26:10+0900",
+    "epochs_sha256": "d06a94de82d97101d68847e80e71f3745904b6c60afef715ba27374eda5f017b",
+    "folder": "20261007_body-local-hand-ctr-wide-relative_7abb08ce",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_hand_ctr_wide_relative_bs32/20261007-024746-0a209458",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_relative_bs32/20261007-024746-0a209458"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_hand_ctr_wide_relative_bs32_compile/20261006-225749-73ffe202",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_relative_bs32_compile/20261006-225749-73ffe202",
+    "run_id": "b069db3728effdc5",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9268367472096161,
+    "best_logged_epoch": 60,
+    "updated_at": "2026-10-07T16:54:40+0900",
+    "epochs_sha256": "865805a149ca75468ae63ad889e6b0d7cb7f8dc7b048013c7fb98c3a3ff750bc",
+    "folder": "20261006_body-local-hand-ctr-wide-relative_b069db37",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_hand_ctr_wide_relative_bs32_compile/20261006-225749-73ffe202",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_relative_bs32_compile/20261006-225749-73ffe202"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_hand_ctr_wide_crosshand_distance_bs32/20261008-002529-496a93e9",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_crosshand_distance_bs32/20261008-002529-496a93e9",
+    "run_id": "fa41a7d2c098e166",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9237090641481663,
+    "best_logged_epoch": 59,
+    "updated_at": "2026-10-08T04:36:04+0900",
+    "epochs_sha256": "0c39bef07f073d2ab88cdfc4be4624be0ac16ea6a6173c56e56c8f9da978d04e",
+    "folder": "20261008_body-local-hand-ctr-wide-relative_fa41a7d2",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_hand_ctr_wide_crosshand_distance_bs32/20261008-002529-496a93e9",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_crosshand_distance_bs32/20261008-002529-496a93e9"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_local_hand_ctr_wide_crosshand_direction_zip/20261008-220235-1777a79b",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_crosshand_direction_zip/20261008-220235-1777a79b",
+    "run_id": "15427b446a47ed36",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9308230099349932,
+    "best_logged_epoch": 61,
+    "updated_at": "2026-10-09T02:14:29+0900",
+    "epochs_sha256": "834110df220fae65652a663d044eaa709ef547d5108362c5c8893f64c10c412d",
+    "folder": "20261008_body-local-hand-ctr-wide-relative_15427b44",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_local_hand_ctr_wide_crosshand_direction_zip/20261008-220235-1777a79b",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_local_hand_ctr_wide_crosshand_direction_zip/20261008-220235-1777a79b"
+      },
+      {
+        "host": "server",
+        "path": "outputs/evaluations/no_pool_20261012/baseline",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/evaluations/no_pool_20261012/baseline"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/no_pool_20261012/baseline",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\no_pool_20261012\\baseline"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_stage_quality_gate_v2_standard_sgd/xsub60/20261010-063525-fb3bb808",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_stage_quality_gate_v2_standard_sgd/xsub60/20261010-063525-fb3bb808",
+    "run_id": "1a0dd72d56cc8f87",
+    "model_variant": "body-local-hand-ctr-wide-relative-routed",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9229118116030909,
+    "best_logged_epoch": 64,
+    "updated_at": "2026-10-10T11:01:09+0900",
+    "epochs_sha256": "0843a3ac89cdc03223851a7bafc5c21ab5d79584fcfe83b743637481d55fbb15",
+    "folder": "20261010_body-local-hand-ctr-wide-relative-routed_1a0dd72d",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_stage_quality_gate_v2_standard_sgd/xsub60/20261010-063525-fb3bb808",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/rtmw_ctr22_handctr21_wide_crosshanddistdir_facest48_stage_quality_gate_v2_standard_sgd/xsub60/20261010-063525-fb3bb808"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/full_gcn_ntu60_xsub/20261010-193341-e9cf699c",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/full_gcn_ntu60_xsub/20261010-193341-e9cf699c",
+    "run_id": "d7027e01a8152cdb",
+    "model_variant": "body-local-hand-ctr-wide-relative-full",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9240156997424261,
+    "best_logged_epoch": 61,
+    "updated_at": "2026-10-11T03:31:24+0900",
+    "epochs_sha256": "0e92fdb0f17038e8d2c6dfa800ffa631380ac0889a165bbae05ca870670cc581",
+    "folder": "20261010_body-local-hand-ctr-wide-relative-full_d7027e01",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/full_gcn_ntu60_xsub/20261010-193341-e9cf699c",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/full_gcn_ntu60_xsub/20261010-193341-e9cf699c"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/full_gcn_20261010",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\full_gcn_20261010"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_hand_body_proximity_ntu60_xsub/20261011-042116-2535429c",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_hand_body_proximity_ntu60_xsub/20261011-042116-2535429c",
+    "run_id": "7a566e43d7a470a6",
+    "model_variant": "best-hand-body-proximity",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9304550472218815,
+    "best_logged_epoch": 62,
+    "updated_at": "2026-10-11T10:52:59+0900",
+    "epochs_sha256": "38f2550d36035df3c9da240e9f369d7f2f92678228ac3758a74d183d3019490c",
+    "folder": "20261011_best-hand-body-proximity_7a566e43",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_hand_body_proximity_ntu60_xsub/20261011-042116-2535429c",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_hand_body_proximity_ntu60_xsub/20261011-042116-2535429c"
+      },
+      {
+        "host": "server",
+        "path": "outputs/evaluations/best_hand_body_proximity_20261011",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/evaluations/best_hand_body_proximity_20261011"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/best_hand_body_proximity_20261011",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\best_hand_body_proximity_20261011"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_action_hand_body_ntu60_xsub/20261011-165334-e2d0a096",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_action_hand_body_ntu60_xsub/20261011-165334-e2d0a096",
+    "run_id": "a3e594409ac30ca0",
+    "model_variant": "best-action-hand-body",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9314362811235128,
+    "best_logged_epoch": 59,
+    "updated_at": "2026-10-12T00:12:57+0900",
+    "epochs_sha256": "82ecc4143e826caaa74d29386f3bc1e4a1ae2c9e1da8786cb4b855a860b2d57b",
+    "folder": "20261011_best-action-hand-body_a3e59440",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_action_hand_body_ntu60_xsub/20261011-165334-e2d0a096",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_action_hand_body_ntu60_xsub/20261011-165334-e2d0a096"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_no_pool_ntu60_xsub/20261012-020217-6f2738bb",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_no_pool_ntu60_xsub/20261012-020217-6f2738bb",
+    "run_id": "a20847d6189fdd47",
+    "model_variant": "body-local-hand-ctr-wide-relative-no-pool",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 64,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9210719980375321,
+    "best_logged_epoch": 65,
+    "updated_at": "2026-10-12T06:10:47+0900",
+    "epochs_sha256": "7e23213073c38ba8709ae075d875bce3ef12d510cbf65327cbc7fedb13c703d2",
+    "folder": "20261012_body-local-hand-ctr-wide-relative-no-pool_a20847d6",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_no_pool_ntu60_xsub/20261012-020217-6f2738bb",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_no_pool_ntu60_xsub/20261012-020217-6f2738bb"
+      },
+      {
+        "host": "server",
+        "path": "outputs/evaluations/no_pool_20261012/no_pool_64",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/evaluations/no_pool_20261012/no_pool_64"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/no_pool_20261012/no_pool_64",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\no_pool_20261012\\no_pool_64"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_no_pool_ntu60_xsub/20261012-061119-9140328e",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_no_pool_ntu60_xsub/20261012-061119-9140328e",
+    "run_id": "3cbf60d73bccb68a",
+    "model_variant": "body-local-hand-ctr-wide-relative-no-pool",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.8914509996320373,
+    "best_logged_epoch": 51,
+    "updated_at": "2026-10-12T12:18:09+0900",
+    "epochs_sha256": "9f5f8f61e481ff1eef8139da8db1ee7f7d4425b7015386bd6cc8913a9a38fdc5",
+    "folder": "20261012_body-local-hand-ctr-wide-relative-no-pool_3cbf60d7",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_no_pool_ntu60_xsub/20261012-061119-9140328e",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_no_pool_ntu60_xsub/20261012-061119-9140328e"
+      },
+      {
+        "host": "server",
+        "path": "outputs/evaluations/no_pool_20261012/no_pool_100_weighted",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/evaluations/no_pool_20261012/no_pool_100_weighted"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/no_pool_20261012/no_pool_100_weighted",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\no_pool_20261012\\no_pool_100_weighted"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_weighted_100_ntu60_xsub/20261012-123216-755cb71f",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_ntu60_xsub/20261012-123216-755cb71f",
+    "run_id": "0c6b227d9df7beef",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 65,
+    "recorded_epochs": 65,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9364037777505213,
+    "best_logged_epoch": 58,
+    "updated_at": "2026-10-12T18:21:10+0900",
+    "epochs_sha256": "16f3cc8769270575be0b5468fb82ff2504c719fe21c996d3b35f1ac2adde350c",
+    "folder": "20261012_body-local-hand-ctr-wide-relative_0c6b227d",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_weighted_100_ntu60_xsub/20261012-123216-755cb71f",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_ntu60_xsub/20261012-123216-755cb71f"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/pool_weighted_100_20261012",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\pool_weighted_100_20261012"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/skelet_gcn/20261012-202145-8f28b9f7",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/skelet_gcn/20261012-202145-8f28b9f7",
+    "run_id": "190a51ad649f34b2",
+    "model_variant": "SkeleT-CTRGCN/ctrgcn",
+    "planned_epochs": 24,
+    "recorded_epochs": 24,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 5,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9548019134061082,
+    "best_logged_epoch": 23,
+    "updated_at": "2026-10-13T15:17:24+0900",
+    "epochs_sha256": "4bebd0c61a61a5d5890dbd407422f2e7766369c6f7f36a03a97a19f674bcfbf7",
+    "folder": "20261012_SkeleT-CTRGCN_ctrgcn_190a51ad",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/skelet_gcn/20261012-202145-8f28b9f7",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/skelet_gcn/20261012-202145-8f28b9f7"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/single_stream_ctr_gcn_20261019",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\single_stream_ctr_gcn_20261019"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/skelet_ctrgcn_official/20261013-154514-542d935b",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/skelet_ctrgcn_official/20261013-154514-542d935b",
+    "run_id": "0d3fa06baea38a01",
+    "model_variant": "SkeleT-CTRGCN/ctrgcn-official-config",
+    "planned_epochs": 24,
+    "recorded_epochs": 24,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 5,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9525328100085858,
+    "best_logged_epoch": 24,
+    "updated_at": "2026-10-14T07:39:47+0900",
+    "epochs_sha256": "405671895fca1c2351f12933f2c3c845d11daa05773bba3cb9abf39d285b15ac",
+    "folder": "20261013_SkeleT-CTRGCN_ctrgcn-official-config_0d3fa06b",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/skelet_ctrgcn_official/20261013-154514-542d935b",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/skelet_ctrgcn_official/20261013-154514-542d935b"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/single_stream_ctr_gcn_20261013",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\single_stream_ctr_gcn_20261013"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_weighted_100_cosine_ntu60_xsub/20261014-074736-ab97a386",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_cosine_ntu60_xsub/20261014-074736-ab97a386",
+    "run_id": "1f8e66b0219122bf",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9464614252422421,
+    "best_logged_epoch": 98,
+    "updated_at": "2026-10-14T16:35:53+0900",
+    "epochs_sha256": "f7bd060f2c92a0e81bda0af08cf256cdbe9495b19a0e5771858e97166908e851",
+    "folder": "20261014_body-local-hand-ctr-wide-relative_1f8e66b0",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_weighted_100_cosine_ntu60_xsub/20261014-074736-ab97a386",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_cosine_ntu60_xsub/20261014-074736-ab97a386"
+      },
+      {
+        "host": "local",
+        "path": "outputs/evaluations/pool_weighted_100_cosine_20261016",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\outputs\\evaluations\\pool_weighted_100_cosine_20261016"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/body_hand_weighted_pool_100_ntu60_xsub/20261015-161433-26ffced3",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_hand_weighted_pool_100_ntu60_xsub/20261015-161433-26ffced3",
+    "run_id": "9017904e5a122955",
+    "model_variant": "body-hand-weighted-pool",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9447442659143873,
+    "best_logged_epoch": 100,
+    "updated_at": "2026-10-16T01:40:01+0900",
+    "epochs_sha256": "c65c546c2599250398a0f57e55302de6bd755565203a61f6a74d6cb4b9e09741",
+    "folder": "20261015_body-hand-weighted-pool_9017904e",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/body_hand_weighted_pool_100_ntu60_xsub/20261015-161433-26ffced3",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/body_hand_weighted_pool_100_ntu60_xsub/20261015-161433-26ffced3"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_hand_relation_100_cosine_ntu60_xsub/20261016-034848-50f97341",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_hand_relation_100_cosine_ntu60_xsub/20261016-034848-50f97341",
+    "run_id": "6a3db682e79b81ef",
+    "model_variant": "best-hand-relation-fusion",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9463387710045382,
+    "best_logged_epoch": 93,
+    "updated_at": "2026-10-16T12:44:21+0900",
+    "epochs_sha256": "61e788851997add205ae715f2d8f11744a46d152ff767cc8bc0a5f81d5362be3",
+    "folder": "20261016_best-hand-relation-fusion_6a3db682",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_hand_relation_100_cosine_ntu60_xsub/20261016-034848-50f97341",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_hand_relation_100_cosine_ntu60_xsub/20261016-034848-50f97341"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/hand_relation_seed_study_20261016/baseline_seed2/20261016-154437-c6e58d65",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/hand_relation_seed_study_20261016/baseline_seed2/20261016-154437-c6e58d65",
+    "run_id": "1bf4f3a7ee9c2cbd",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 2,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9372010302955968,
+    "best_logged_epoch": 99,
+    "updated_at": "2026-10-17T00:26:48+0900",
+    "epochs_sha256": "43665bdcd70e6c1e2ebb397af5bf758eacaf3c2c1c4e1b650ef6664b79a3c66b",
+    "folder": "20261016_body-local-hand-ctr-wide-relative_1bf4f3a7",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/hand_relation_seed_study_20261016/baseline_seed2/20261016-154437-c6e58d65",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/hand_relation_seed_study_20261016/baseline_seed2/20261016-154437-c6e58d65"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/hand_relation_seed_study_20261016/relation_seed2/20261017-002822-028577d6",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/hand_relation_seed_study_20261016/relation_seed2/20261017-002822-028577d6",
+    "run_id": "952a1987f4f5d15e",
+    "model_variant": "best-hand-relation-fusion",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 2,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9436403777750522,
+    "best_logged_epoch": 95,
+    "updated_at": "2026-10-17T10:28:17+0900",
+    "epochs_sha256": "b49bf5c2bb3aba67af15cc1f0859b59fdc93f4c7b190f5eab9aa505cd54581b9",
+    "folder": "20261016_best-hand-relation-fusion_952a1987",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/hand_relation_seed_study_20261016/relation_seed2/20261017-002822-028577d6",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/hand_relation_seed_study_20261016/relation_seed2/20261017-002822-028577d6"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_shared_global_graph_100_cosine_ntu60_xsub_original_rerun/20261017-155934-55a99910",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_shared_global_graph_100_cosine_ntu60_xsub_original_rerun/20261017-155934-55a99910",
+    "run_id": "67d33c42cf2a09de",
+    "model_variant": "body-local-shared-global-graph-100",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9412486201398258,
+    "best_logged_epoch": 89,
+    "updated_at": "2026-10-18T00:59:58+0900",
+    "epochs_sha256": "d2d25f5efce821e904986ce481d2e5ce0aead8a08182a5ab52bddb11723f6b2f",
+    "folder": "20261017_body-local-shared-global-graph-100_67d33c42",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_shared_global_graph_100_cosine_ntu60_xsub_original_rerun/20261017-155934-55a99910",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_shared_global_graph_100_cosine_ntu60_xsub_original_rerun/20261017-155934-55a99910"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_weighted_100_same_channel_late_aug_ntu60_xsub/20261018-040808-13a354c2",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_same_channel_late_aug_ntu60_xsub/20261018-040808-13a354c2",
+    "run_id": "dfa00067eb2045d1",
+    "model_variant": "body-local-hand-ctr-wide-relative-same-channel-late-aug",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9457254998160186,
+    "best_logged_epoch": 97,
+    "updated_at": "2026-10-18T21:11:34+0900",
+    "epochs_sha256": "ac8989e4169b16123107b9244bef5a8a9002f4f8143e1de9e2dc24e1f97e6942",
+    "folder": "20261018_body-local-hand-ctr-wide-relative-same-channel-late-aug_dfa00067",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_weighted_100_same_channel_late_aug_ntu60_xsub/20261018-040808-13a354c2",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_same_channel_late_aug_ntu60_xsub/20261018-040808-13a354c2"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/input_joint_select_100_ntu60_xsub/20261020-015759-c780d5b0",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/input_joint_select_100_ntu60_xsub/20261020-015759-c780d5b0",
+    "run_id": "c1592145c2f88b14",
+    "model_variant": "best-input-joint-selection",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "finished",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9473813320250214,
+    "best_logged_epoch": 91,
+    "updated_at": "2026-10-20T12:54:55+0900",
+    "epochs_sha256": "18123d243bfe57a458608a3375b3c41ad06f868326820f99b40c8706fa0ee2a3",
+    "folder": "20261020_best-input-joint-selection_c1592145",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/input_joint_select_100_ntu60_xsub/20261020-015759-c780d5b0",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/input_joint_select_100_ntu60_xsub/20261020-015759-c780d5b0"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/input_joint_v5_dynamic_select_100_ntu60_xsub/20261021-001808-6e289fb9",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/input_joint_v5_dynamic_select_100_ntu60_xsub/20261021-001808-6e289fb9",
+    "run_id": "f305e3f98fdacdc5",
+    "model_variant": "best-input-joint-selection-v5-dynamic",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "finished",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9268980743284679,
+    "best_logged_epoch": 95,
+    "updated_at": "2026-10-21T09:54:50+0900",
+    "epochs_sha256": "9481b0d92e4b019d845c08964d79a5e6d57ab61f941547d81a67403eb6c5a19f",
+    "folder": "20261021_best-input-joint-selection-v5-dynamic_f305e3f9",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/input_joint_v5_dynamic_select_100_ntu60_xsub/20261021-001808-6e289fb9",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/input_joint_v5_dynamic_select_100_ntu60_xsub/20261021-001808-6e289fb9"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_weighted_100_robustness_ntu60_xsub/20261021-225223-2094cfbd",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_robustness_ntu60_xsub/20261021-225223-2094cfbd",
+    "run_id": "3f2968aeb23e356b",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9409419845455661,
+    "best_logged_epoch": 99,
+    "updated_at": "2026-10-22T07:33:25+0900",
+    "epochs_sha256": "760ee6f08f098a6fab8ad55804425d15943ce43fe1e639cde5b843472bc8fa86",
+    "folder": "20261021_body-local-hand-ctr-wide-relative_3f2968ae",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_weighted_100_robustness_ntu60_xsub/20261021-225223-2094cfbd",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_robustness_ntu60_xsub/20261021-225223-2094cfbd"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_weighted_100_robustness_ntu60_xsub/20261022-095524-24de94d2",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_robustness_ntu60_xsub/20261022-095524-24de94d2",
+    "run_id": "5c85f3bfa38708d9",
+    "model_variant": "body-local-hand-ctr-wide-relative",
+    "planned_epochs": 150,
+    "recorded_epochs": 150,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9356678523242978,
+    "best_logged_epoch": 144,
+    "updated_at": "2026-10-22T22:51:54+0900",
+    "epochs_sha256": "53f98dde0ba861f46ce5434b9eb513688794235b8263a35862b01d7e2c71fc08",
+    "folder": "20261022_body-local-hand-ctr-wide-relative_5c85f3bf",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_weighted_100_robustness_ntu60_xsub/20261022-095524-24de94d2",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_weighted_100_robustness_ntu60_xsub/20261022-095524-24de94d2"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_face_pair_stable_100_20261103/20261103-052121-a73ca490",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_stable_100_20261103/20261103-052121-a73ca490",
+    "run_id": "81808aac922ee336",
+    "model_variant": "best-face-pair",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9441923218447197,
+    "best_logged_epoch": 83,
+    "updated_at": "2026-11-03T13:55:18+0900",
+    "epochs_sha256": "3edc71a8e741a03f437802542962e5d0bfee3c363eb4a7118cbca00c9eeabc6c",
+    "folder": "20261103_best-face-pair_81808aac",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_face_pair_stable_100_20261103/20261103-052121-a73ca490",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_stable_100_20261103/20261103-052121-a73ca490"
+      },
+      {
+        "host": "local",
+        "path": "docs/face_pair_validation/best_epoch83_evaluation",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\docs\\face_pair_validation\\best_epoch83_evaluation"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_face_pair_raw_xy_100_20261104/20261104-042208-2114ec86",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_raw_xy_100_20261104/20261104-042208-2114ec86",
+    "run_id": "3bdb0556db3d4f78",
+    "model_variant": "best-face-pair-raw-xy",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 1,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9422911811603091,
+    "best_logged_epoch": 85,
+    "updated_at": "2026-11-04T12:56:03+0900",
+    "epochs_sha256": "bc0cdc02171426015f037abd7d34c19b9823eddc84dd3b5ca5bd0e41c1524767",
+    "folder": "20261104_best-face-pair-raw-xy_3bdb0556",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_face_pair_raw_xy_100_20261104/20261104-042208-2114ec86",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_raw_xy_100_20261104/20261104-042208-2114ec86"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_face_pair_100_seed2_20261105/20261105-051202-2fcd5590",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_100_seed2_20261105/20261105-051202-2fcd5590",
+    "run_id": "11fb95c049aa818d",
+    "model_variant": "best-face-pair",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 2,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9492211455905801,
+    "best_logged_epoch": 100,
+    "updated_at": "2026-11-05T14:02:04+0900",
+    "epochs_sha256": "7c86c95af77609364358a07a686ae688d92f00f9346d64a5ae0dc6275877bc63",
+    "folder": "20261105_best-face-pair_11fb95c0",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_face_pair_100_seed2_20261105/20261105-051202-2fcd5590",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_100_seed2_20261105/20261105-051202-2fcd5590"
+      },
+      {
+        "host": "local",
+        "path": "docs/face_pair_validation/codex_20261105/seed2_epoch100",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\docs\\face_pair_validation\\codex_20261105\\seed2_epoch100"
+      },
+      {
+        "host": "local",
+        "path": "docs/face_pair_validation/codex_20261105/seed2_epoch100_accuracy_weighted",
+        "absolute_path": "C:\\Users\\15637\\PycharmProjects\\ISAA\\docs\\face_pair_validation\\codex_20261105\\seed2_epoch100_accuracy_weighted"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/face_pair_handface_geometry_100_ntu60_xsub_seed17_20261105/20261105-201636-144967c4",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/face_pair_handface_geometry_100_ntu60_xsub_seed17_20261105/20261105-201636-144967c4",
+    "run_id": "548d4bb21e82e86c",
+    "model_variant": "best-face-pair-hand-face-geometry",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 17,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9458481540537226,
+    "best_logged_epoch": 86,
+    "updated_at": "2026-11-06T05:07:28+0900",
+    "epochs_sha256": "f6d0b5e90240c548cfe578a0f59023d76080cd48e4ef8515b5a2b511305e8078",
+    "folder": "20261105_best-face-pair-hand-face-geometry_548d4bb2",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/face_pair_handface_geometry_100_ntu60_xsub_seed17_20261105/20261105-201636-144967c4",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/face_pair_handface_geometry_100_ntu60_xsub_seed17_20261105/20261105-201636-144967c4"
+      }
+    ]
+  },
+  {
+    "host": "server",
+    "path": "outputs/best_face_pair_derived_geometry_dropout_100_20261107/20261107-051834-4ba30ff4",
+    "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_derived_geometry_dropout_100_20261107/20261107-051834-4ba30ff4",
+    "run_id": "6e6c27ff09631e73",
+    "model_variant": "best-face-pair",
+    "planned_epochs": 100,
+    "recorded_epochs": 100,
+    "status": "completed",
+    "completion_evidence": "completed_status_and_full_history",
+    "scope": "full_schedule",
+    "split": "xsub60",
+    "seed": 29,
+    "window_size": 100,
+    "max_samples": 0,
+    "repeat": 1,
+    "accuracy_units": "fraction",
+    "best_logged_val_acc": 0.9388568625045995,
+    "best_logged_epoch": 87,
+    "updated_at": "2026-11-07T13:27:07+0900",
+    "epochs_sha256": "c699386561337938d7f05d10f40ba63e67282a99e8afae6b04af633b78b45b80",
+    "folder": "20261107_best-face-pair_6e6c27ff",
+    "sources": [
+      {
+        "host": "server",
+        "path": "outputs/best_face_pair_derived_geometry_dropout_100_20261107/20261107-051834-4ba30ff4",
+        "absolute_path": "/home/xiong/Desktop/ISAA/outputs/best_face_pair_derived_geometry_dropout_100_20261107/20261107-051834-4ba30ff4"
+      }
+    ]
+  }
+]
